@@ -1,0 +1,37 @@
+name: check-agent-trailers
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  trailers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check trailers on PR commits
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          mapfile -t SHAS < <(git rev-list --reverse "${BASE}..${HEAD}")
+          if [ "${#SHAS[@]}" -eq 0 ]; then
+            echo "No commits to check."
+            exit 0
+          fi
+          fail=0
+          for sha in "${SHAS[@]}"; do
+            git log -1 --format=%B "$sha" > /tmp/msg.txt
+            echo "::group::$sha"
+            if ! node scripts/check-agent-trailers.mjs --message-file /tmp/msg.txt; then
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$fail"
