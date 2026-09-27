@@ -1,0 +1,26 @@
+name: check-agent-trailers
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  trailers:
+    name: Agent commit trailers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out consumer history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check trailers on PR commits
+        # Reuse this pack's Action and both scripts at one reviewed revision.
+        uses: R4yHarris/github-agent-contracts/.github/actions/check-agent-trailers@f2f2e57e6c349498927830aef8f3e18c7a192f95
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          require-on-all-commits: "false"

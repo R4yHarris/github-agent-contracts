@@ -28,6 +28,10 @@ Humans can review the same rules agents follow, while commit trailers make claim
 
 Adapt the workspace-specific names in the instruction files when adopting the pack. Human approval, scoped permissions, and tool restrictions enforce boundaries; prompts alone do not.
 
+## Use in another repo
+
+Follow the [adoption guide](docs/adopt.md) and copy the [consumer workflow](examples/consumer-repo/.github/workflows/check-agent-trailers.yml). Reference the pinned public Action without copying scripts, or vendor the Action and both scripts together. No package registry or GitHub App credentials are needed for the trailer check.
+
 ## Non-goals
 
 - No self-hosted forge
@@ -61,7 +65,7 @@ See the [trailer spec](docs/commit-trailers.md) for parsing rules, limitations, 
 
 The [read-only PR workflow](.github/workflows/check-agent-trailers.yml) checks every PR commit, including bot-authored commits without an `AI-Agent:` marker. It uses the [composite Action](.github/actions/check-agent-trailers/action.yml) and both checker scripts from the base revision. Missing or incomplete history fails closed.
 
-Copy the workflow, Action directory, and both `scripts/check-*.mjs` files together when adopting this check. Bootstrap them on the base branch before requiring the status check. No App token or other custom secret is needed for this workflow.
+When vendoring this check, copy the workflow, Action directory, and both `scripts/check-*.mjs` files together. Bootstrap the Action and scripts on the base branch before enabling the local workflow. No App token or other custom secret is needed for this workflow.
 
 ## Agentic workflow
 
