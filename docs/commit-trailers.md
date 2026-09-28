@@ -12,12 +12,28 @@ AI-Model: gpt-4.1
 `AI-Agent` is a stable role name (`copilot-coding-agent`, `hermes-coder`, `codex-cli`).  
 `AI-Model` may be `unknown` if the harness does not expose it.
 
+## Optional compact run metadata
+
+v0.2.0 adds one optional trailer without changing the two required trailers:
+
+```text
+AI-Agent: hermes-coder
+AI-Model: claude-sonnet-4.5
+AI-Run: 1|anthropic|claude-sonnet-4.5@20250901|h|18234/200000|2510|ses_01K8|feat-auth
+```
+
+The eight fields are `schema|provider|model@version|effort|in/max|out|session|task`, with no spaces around pipes. Use harness-provided values, `-` for missing slots, and `unknown` for a missing version. Additional trailing fields are ignored for forward compatibility; invalid known fields fail parsing. See [METRICS.md](METRICS.md) for exact rules, the `AI_*` environment table, PR body pair, and local JSONL export.
+
+`agent-pr.mjs` omits `AI-Run` when run environment input is absent. The default checker still requires only `AI-Agent` and `AI-Model`; `--require-run` requires a valid `AI-Run` on agent-classified messages. Do not add `AI-X-*` trailers, prompts, or traces. Human `AI-Eval` belongs in a separate PR comment, never a generated trailer or edited commit.
+
 ## Recommended
 
 ```
 AI-Session: 2026-09-27T18:00:00Z-abc123
 Co-authored-by: Your Name <you@users.noreply.github.com>
 ```
+
+`AI-Session` remains compatible with older consumers; new harnesses using `AI-Run` can carry the opaque session identifier in that single compact trailer instead.
 
 ## Example
 
@@ -53,9 +69,10 @@ node scripts/check-agent-trailers.mjs --help
 node scripts/check-agent-trailers.mjs --message-file path/to/message.txt
 node scripts/check-agent-trailers.mjs --message-file path/to/message.txt --author-email '123+coder[bot]@users.noreply.github.com' --json
 node scripts/check-agent-trailers.mjs --require --message "fix typo"
+node scripts/check-agent-trailers.mjs --require-run --message-file path/to/message.txt
 ```
 
-Choose exactly one of `--message` or `--message-file`. Exit codes are `0` for a passing check, `1` for missing required trailers, and `2` for invalid arguments or an unreadable message file. `--json` reports `agentAuthored`, `trailers`, `missing`, and `ok` for a completed check.
+Choose exactly one of `--message` or `--message-file`. Exit codes are `0` for a passing check, `1` for missing required trailers or invalid required run metadata, and `2` for invalid arguments or an unreadable message file. `--json` reports `agentAuthored`, `trailers`, `missing`, and `ok` for a completed check. With `--require-run`, `missing` includes `AI-Run` when it is absent or malformed, including a model that differs from `AI-Model`. Without that flag, optional run data does not affect the check. Combine `--require` and `--require-run` to require it on every message.
 
 ## PR Action
 
@@ -74,7 +91,7 @@ To require trailers even on human-authored commits, change the workflow's Action
 
 The runner rejects missing commits, shallow history, empty ranges, and invalid input instead of treating a failed scan as success. It reports each checked SHA without printing untrusted commit messages.
 
-The workflow fetches PR history, then checks out the base revision before running the local Action. Bootstrap the Action and both scripts on the target branch before making this check required. Checker changes take effect after they reach that branch; run the tests on proposed changes before merging them. Protect the workflow and contract files with human review as well.
+The workflow fetches PR history, then checks out the base revision before running the local Action. Bootstrap the Action, both checker scripts, and their shared `scripts/parse-agent-run.mjs` dependency on the target branch before making this check required. Checker changes take effect after they reach that branch; run the tests on proposed changes before merging them. Protect the workflow and contract files with human review as well.
 
 ## Limits
 

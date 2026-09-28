@@ -7,9 +7,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildCommitMessage, createAppJwt, main,
-  mintInstallationToken, parseArgs, parseOrigin, publishAgentPr,
+  mintInstallationToken, parseArgs, parseOrigin, publishAgentPr, upsertAgentRun,
 } from "../scripts/agent-pr.mjs";
 import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy } from "../scripts/load-agent-policy.mjs";
+import { packAgentRun, parseTrailers } from "../scripts/parse-agent-run.mjs";
 
 const policySource = readFileSync(new URL("../examples/agent-policy.yml", import.meta.url), "utf8");
 const approvedPolicyFile = { type: "file", encoding: "base64", content: Buffer.from(policySource).toString("base64") };
@@ -25,6 +26,11 @@ const credentials = { appId: "123", privateKey, owner: "example-owner", reposito
 const cwd = fileURLToPath(new URL("../", import.meta.url));
 const commitSha = "a".repeat(40);
 const repository = { full_name: "example-owner/example-repo", default_branch: "main", archived: false };
+const runEnvironment = {
+  AI_PROVIDER: "anthropic", AI_MODEL: "claude-sonnet-4.5", AI_MODEL_VERSION: "20250901", AI_EFFORT: "high",
+  AI_CONTEXT_USED: "18234", AI_CONTEXT_MAX: "200000", AI_CONTEXT_OUT: "2510", AI_SESSION: "ses_01K8", AI_TASK: "feat-auth",
+};
+const compactRun = "1|anthropic|claude-sonnet-4.5@20250901|h|18234/200000|2510|ses_01K8|feat-auth";
 
 function mockGitHub(responses) {
   const calls = [];
@@ -226,6 +232,110 @@ test("an existing open PR is reused without running gh pr create", async () => {
   const result = await publishAgentPr({ message: "fix: helper" }, mock.dependencies);
   assert.equal(result.createdPullRequest, false);
   assert.ok(!mock.commands.some((call) => call.command === "gh" && call.args[0] === "pr"));
+});
+
+test("AI-Run PR body upsert replaces exactly one tagged pair and preserves other text", () => {
+  const block = `<!-- agent-run:1 -->\n\`${compactRun}\``;
+  assert.equal(upsertAgentRun("", compactRun), block);
+  assert.equal(upsertAgentRun("Description.", compactRun), `Description.\n\n${block}`);
+  const existing = "Description.\n\n<!-- agent-run:1 -->\n`old-value`\n\n## Review\nHuman text.";
+  const expected = `Description.\n\n${block}\n\n## Review\nHuman text.`;
+  assert.equal(upsertAgentRun(existing, compactRun), expected);
+  assert.equal(upsertAgentRun(expected, compactRun), expected);
+  assert.equal(upsertAgentRun(existing, null), existing);
+  assert.equal(upsertAgentRun("<!-- agent-run:1 -->\nHuman text.", compactRun), `${block}\nHuman text.`);
+  const duplicate = upsertAgentRun(`${existing}\n\n<!-- agent-run:1 -->\n\`another-value\``, compactRun);
+  assert.equal(duplicate.match(/<!-- agent-run:1 -->/g).length, 1);
+  assert.equal(duplicate.match(new RegExp(compactRun.replaceAll("|", "\\|"), "g")).length, 1);
+  assert.ok(duplicate.includes("Human text."));
+  assert.ok(!duplicate.includes("another-value"));
+  assert.equal(upsertAgentRun("Description.\r\n\r\n<!-- agent-run:1 -->\r\n`old`\r\nEnd.", compactRun), `Description.\r\n\r\n${block}\r\nEnd.`);
+});
+
+test("AI-Run is omitted when environment input is absent, including with --model alone", async () => {
+  for (const model of [undefined, "explicit-model"]) {
+    const mock = mockPublication();
+    await publishAgentPr({ message: "feat: helper", model }, mock.dependencies);
+    const commit = mock.commands.find((call) => call.args.includes("commit"));
+    assert.ok(!commit.input.includes("AI-Run:"));
+    const create = mock.commands.find((call) => call.command === "gh" && call.args[1] === "create");
+    assert.ok(!create.args[create.args.indexOf("--body") + 1].includes("agent-run:1"));
+    assert.ok(!mock.requests.some((call) => call.method === "PATCH"));
+  }
+});
+
+test("AI-Run uses supplied environment data and AI_MODEL, with --model taking precedence", async () => {
+  for (const explicitModel of [undefined, "cli-model"]) {
+    const mock = mockPublication();
+    Object.assign(mock.dependencies.env, runEnvironment, { AI_EVAL: "must-not-be-published" });
+    const output = [];
+    const args = ["--message", "feat: helper", ...(explicitModel ? ["--model", explicitModel] : [])];
+    assert.equal(await main(args, { ...mock.dependencies, stdout: { write: (text) => output.push(text) }, stderr: { write: (text) => output.push(text) } }), 0);
+    const expectedModel = explicitModel ?? runEnvironment.AI_MODEL;
+    const expectedRun = packAgentRun(runEnvironment, expectedModel);
+    const commit = mock.commands.find((call) => call.args.includes("commit"));
+    assert.deepEqual(parseTrailers(commit.input), { "AI-Agent": AGENT, "AI-Model": expectedModel, "AI-Run": expectedRun });
+    assert.equal(commit.input.match(/^AI-Run:/gm).length, 1);
+    const create = mock.commands.find((call) => call.command === "gh" && call.args[1] === "create");
+    const body = create.args[create.args.indexOf("--body") + 1];
+    assert.ok(body.endsWith(`<!-- agent-run:1 -->\n\`${expectedRun}\``));
+    assert.ok(!body.includes("AI-Run:"));
+    assert.ok(!commit.input.includes("AI-Eval") && !body.includes("AI-Eval"));
+    assert.ok(!body.includes("must-not-be-published"));
+  }
+});
+
+test("AI-Run missing slots use sentinels and invalid effort fails before authentication", async () => {
+  const partial = mockPublication();
+  partial.dependencies.env.AI_PROVIDER = "local";
+  await publishAgentPr({ message: "feat: helper" }, partial.dependencies);
+  assert.equal(parseTrailers(partial.commands.find((call) => call.args.includes("commit")).input)["AI-Run"], "1|local|unknown@unknown|-|-/-|-|-|-");
+  const invalid = mockPublication();
+  Object.assign(invalid.dependencies.env, runEnvironment, { AI_EFFORT: "secret-invalid-effort" });
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, invalid.dependencies), { message: "Invalid AI-Run effort; see docs/METRICS.md." });
+  assert.equal(invalid.keyReads(), 0);
+  assert.equal(invalid.requests.length, 0);
+  assert.equal(invalid.commands.length, 0);
+});
+
+test("AI-Run upserts the current PR body without replacing human content or creating a second PR", async () => {
+  for (const existingBody of [
+    "Human description.\n\n<!-- agent-run:1 -->\n`old-value`\n\nReview notes.",
+    "Human description.", null,
+    `Human description.\n\n<!-- agent-run:1 -->\n\`${compactRun}\``,
+  ]) {
+    const mock = mockPublication({ pullRequests: [{ number: 7 }] });
+    Object.assign(mock.dependencies.env, runEnvironment);
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (url.endsWith("/pulls/7")) {
+        mock.requests.push({ url, ...options });
+        return Response.json({
+          number: 7, state: "open", body: existingBody,
+          head: { sha: commitSha, ref: "feat/bot-helper", repo: { full_name: repository.full_name } },
+        });
+      }
+      return originalFetch(url, options);
+    };
+    await publishAgentPr({ message: "feat: helper" }, mock.dependencies);
+    const patches = mock.requests.filter((call) => call.method === "PATCH");
+    const expectedBody = upsertAgentRun(existingBody, compactRun);
+    assert.equal(patches.length, existingBody === expectedBody ? 0 : 1);
+    if (patches.length) assert.deepEqual(JSON.parse(patches[0].body), { body: expectedBody });
+    assert.ok(!mock.commands.some((call) => call.command === "gh" && call.args[1] === "create"));
+  }
+});
+
+test("AI-Run changes made by a commit hook are rejected before pushing", async () => {
+  const mock = mockPublication();
+  Object.assign(mock.dependencies.env, runEnvironment);
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    const output = originalRun(command, args, options);
+    return args[0] === "log" ? output.replace("|h|", "|x|") : output;
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /required bot identity and trailers/);
+  assert.ok(!mock.commands.some((call) => call.args[0] === "push"));
 });
 
 test("missing, invalid, or insufficient local policy denies publication before commands, key access, or network calls", async () => {
@@ -841,7 +951,7 @@ test("local Git integration commits selected and staged files with bot provenanc
   context.after(() => rmSync(directory, { recursive: true, force: true, maxRetries: 3 }));
   const commands = [];
   const gitEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-    !/^(GIT_|GH_|GITHUB_APP_)/i.test(name) && !/^(GITHUB_TOKEN|GITHUB_ENTERPRISE_TOKEN)$/i.test(name)
+    !/^(AI_|GIT_|GH_|GITHUB_APP_)/i.test(name) && !/^(GITHUB_TOKEN|GITHUB_ENTERPRISE_TOKEN)$/i.test(name)
   ));
   const localGit = (args, options = {}) => execFileSync("git", [
     "-c", "core.fsmonitor=false",

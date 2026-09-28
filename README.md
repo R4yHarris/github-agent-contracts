@@ -48,7 +48,7 @@ See [HARNESSES](docs/HARNESSES.md) for integration details. On a dedicated WSL/H
 
 ## Use in another repo
 
-Follow [ONBOARDING](docs/ONBOARDING.md) for the complete file list and [adopt.md](docs/adopt.md) for distribution options. Copy the [consumer workflow](examples/consumer-repo/.github/workflows/check-agent-trailers.yml) with a pinned public Action, or vendor the [composite Action](.github/actions/check-agent-trailers/action.yml) with both checker scripts. No private-package infrastructure or App credentials are required for the read-only trailer check itself.
+Follow [ONBOARDING](docs/ONBOARDING.md) for the complete file list and [adopt.md](docs/adopt.md) for distribution options. Copy the [consumer workflow](examples/consumer-repo/.github/workflows/check-agent-trailers.yml) with a pinned public Action, or vendor the [composite Action](.github/actions/check-agent-trailers/action.yml) with both checker scripts and their [shared parser](scripts/parse-agent-run.mjs). No private-package infrastructure or App credentials are required for the read-only trailer check itself.
 
 The manifest is a static template, not a hosted registration button. Its placeholder callback URLs need an owner-controlled receiver for GitHub's manifest flow; onboarding also documents the manual registration path. No hosted callback or control plane is provided.
 
@@ -74,6 +74,10 @@ AI-Model: unknown
 The check inspects messages containing `AI-Agent:` and GitHub noreply bot authors by default. Unmarked human commits pass. `--require`, or the Action's `require-on-all-commits: "true"`, requires trailers on every commit. See the [trailer specification](docs/commit-trailers.md) for parsing, exit codes, and limits.
 
 The [PR workflow](.github/workflows/check-agent-trailers.yml) uses the trusted base revision's checker with full history and read-only permissions. Bootstrap the Action and scripts before enabling the local workflow. Humans must configure required checks, reviews, and branch protection; the script does not configure them.
+
+## Optional run metadata (v0.2.0)
+
+Harnesses can supply compact run information through the documented `AI_*` environment variables. The publisher adds one optional `AI-Run` trailer and upserts a tagged PR body pair; with no supplied metadata, publishing and the default two-trailer check remain unchanged. `--require-run` opts into validation. [METRICS.md](docs/METRICS.md) specifies the format, human-only `AI-Eval` comments, and local JSONL export with [export-agent-metrics.mjs](scripts/export-agent-metrics.mjs). No analytics service, prompts, traces, or generated quality scores are added.
 
 ## With gh-aw
 

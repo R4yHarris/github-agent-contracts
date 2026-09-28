@@ -62,6 +62,12 @@ node scripts/load-agent-policy.mjs --role coder --capability open_pr
 node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model unknown --files README.md
 ```
 
+## Optional run metadata
+
+- Harnesses SHOULD export the known `AI_PROVIDER`, `AI_MODEL`, `AI_MODEL_VERSION`, `AI_EFFORT`, `AI_CONTEXT_USED`, `AI_CONTEXT_MAX`, `AI_CONTEXT_OUT`, `AI_SESSION`, and `AI_TASK` values before invoking `agent-pr.mjs`. Never invent missing values or infer counts, effort, session, or task identifiers.
+- Follow `docs/METRICS.md`: the helper emits a single optional compact `AI-Run` trailer and tagged PR body pair when metadata is supplied. `--model` overrides `AI_MODEL`; absent environment metadata leaves the two required trailers unchanged. No prompts, traces, credentials, extra `AI-X-*` trailers, or second YAML document belong in git.
+- Humans evaluate through separate `AI-Eval` PR comments, not by editing trailers. Agents must not generate evaluations, quality scores, or analytics-service integrations.
+
 ## Day-1 build targets
 
 Implement what `docs/DAY1_SCOPE.md` lists. Prefer small, tested files.

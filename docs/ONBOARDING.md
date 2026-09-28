@@ -35,6 +35,7 @@ scripts/agent-pr.mjs
 scripts/load-agent-policy.mjs
 scripts/check-agent-trailers.mjs
 scripts/check-pr-agent-trailers.mjs
+scripts/parse-agent-run.mjs
 examples/agent-policy.yml
 .github/actions/check-agent-trailers/action.yml
 .github/workflows/check-agent-trailers.yml
@@ -42,9 +43,11 @@ examples/agent-policy.yml
 
 Use Node 20+, Git, and `gh` for publication. Adapt the workspace name and test command in the copied rules. Follow [HARNESSES.md](HARNESSES.md) for the small harness-specific pointers, and [adopt.md](adopt.md) for the pinned public-Action alternative and vendoring details. No private-package infrastructure or runtime dependency installation is needed.
 
+The shared parser is required by the checker and publisher. Optional run metadata and the local JSONL exporter are documented in [METRICS.md](METRICS.md); no `AI_*` run variables are required for ordinary publication.
+
 A human must review [the policy example](../examples/agent-policy.yml), install it as root `agent-policy.yml`, and publish it on the default branch through the existing human review process. Include that reviewed version in the feature branch too. Keep merger and deploy allow-lists empty. The publisher requires coder `commit_branch` and `open_pr`, checks the default-branch policy, and refuses root-policy edits; there is no example fallback. See [POLICY.md](POLICY.md) and [ROLES.md](ROLES.md). Copy their guidance with the skills when adopting the pack.
 
-For the local Action, land the Action and both checker scripts on the target branch before enabling the workflow, because it executes the base revision's trusted checker. A human bootstraps and publishes `.github/workflows/**` changes: the helper refuses staged or selected workflow paths before token minting, and the coder App intentionally has no Workflows permission. Keep human review on changes to the workflow, instructions, and publisher.
+For the local Action, land the Action, both checker scripts, and the shared parser on the target branch before enabling the workflow, because it executes the base revision's trusted checker. A human bootstraps and publishes `.github/workflows/**` changes: the helper refuses staged or selected workflow paths before token minting, and the coder App intentionally has no Workflows permission. Keep human review on changes to the workflow, instructions, and publisher.
 
 ## 3. Protect the branch and publish
 

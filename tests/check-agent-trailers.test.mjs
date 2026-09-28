@@ -182,7 +182,44 @@ test("CLI usage errors exit two", () => {
 test("CLI --help documents flags and exits zero", () => {
   const result = runChecker(["--help"]);
   assert.equal(result.status, 0, result.stderr);
-  for (const flag of ["--help", "--message", "--message-file", "--author-email", "--require", "--json"]) {
+  for (const flag of ["--help", "--message", "--message-file", "--author-email", "--require", "--require-run", "--json"]) {
     assert.ok(result.stdout.includes(flag), flag);
   }
+});
+
+test("default checks still require only AI-Agent and AI-Model", () => {
+  const message = "feat: x\n\nAI-Agent: coder\nAI-Model: known-model\n";
+  assert.equal(checkMessage(message).ok, true);
+  assert.equal(checkMessage(`${message}AI-Run: invalid\n`).ok, true);
+});
+
+test("--require-run requires valid compact metadata matching AI-Model only on agent commits", () => {
+  const message = "feat: x\n\nAI-Agent: coder\nAI-Model: known-model\n";
+  assert.deepEqual(checkMessage(message, false, "", true).missing, ["AI-Run"]);
+  assert.equal(checkMessage(`${message}AI-Run: 1|openai|known-model@unknown|m|12/100|5|session|task\n`, false, "", true).ok, true);
+  for (const run of [
+    "1|openai|different-model@unknown|m|12/100|5|session|task",
+    "1|openai|known-model@unknown|medium|12/100|5|session|task",
+    "2|openai|known-model@unknown|m|12/100|5|session|task",
+    "", "not a compact record",
+  ]) {
+    assert.deepEqual(checkMessage(`${message}AI-Run: ${run}\n`, false, "", true).missing, ["AI-Run"]);
+  }
+  assert.equal(checkMessage("fix typo\n", false, "", true).ok, true);
+  assert.deepEqual(checkMessage("fix typo\n", true, "", true).missing, ["AI-Agent", "AI-Model", "AI-Run"]);
+  assert.deepEqual(checkMessage("fix typo\n", false, "1+coder[bot]@users.noreply.github.com", true).missing, ["AI-Agent", "AI-Model", "AI-Run"]);
+});
+
+test("CLI --require-run reports absent or malformed metadata without making human commits mandatory", () => {
+  const message = "feat: x\n\nAI-Agent: coder\nAI-Model: known-model\n";
+  const missing = runChecker(["--require-run", "--message", message, "--json"]);
+  assert.equal(missing.status, 1);
+  assert.deepEqual(JSON.parse(missing.stdout).missing, ["AI-Run"]);
+  const invalid = runChecker(["--require-run", "--message", `${message}AI-Run: invalid\n`]);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /missing or invalid trailers: AI-Run/);
+  assert.equal(runChecker(["--require-run", "--message", "fix typo"]).status, 0);
+  assert.equal(runChecker(["--require", "--require-run", "--message", "fix typo"]).status, 1);
+  const valid = runChecker(["--require-run", "--message", `${message}AI-Run: 1|-|known-model@unknown|-|-/-|-|-|-|future\n`]);
+  assert.equal(valid.status, 0, valid.stderr);
 });
