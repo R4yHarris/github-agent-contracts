@@ -58,7 +58,7 @@ Follow the [adoption guide](docs/adopt.md) and copy the [consumer workflow](exam
 
 Hermes, Copilot, Claude Code, and Cursor share one human-owned root `agent-policy.yml`. The [example](examples/agent-policy.yml) allows coder branch commits, draft PRs, comments, and labels; merger and deploy allow-lists are empty. Missing policy denies publication, and agents must not edit policy to grant themselves rights.
 
-Read [POLICY.md](docs/POLICY.md) for the three permission layers and human bootstrap, and [ROLES.md](docs/ROLES.md) for separate role Apps and a WSL host holding only the coder key. The coder publisher has no merge, protected-push, or deployment mode. No active root policy or hosted control plane is installed by this pack.
+Read [POLICY.md](docs/POLICY.md) for the three permission layers, human bootstrap, and optional `--merge-when-green` flow, and [ROLES.md](docs/ROLES.md) for role-key separation. Merging remains disabled unless a human grants coder `merge` and authorizes the flag; it requires a successful exact-head trailer check and creates a merge commit before remote-branch cleanup. Protected pushes and deploys remain unsupported. No active policy grant or hosted control plane is installed by this pack.
 
 ## Non-goals
 

@@ -10,9 +10,11 @@ Use separate, user/org-owned GitHub Apps for **coder**, **merger**, and **deploy
 
 Only the coder publisher exists in this pack. Do not provision or distribute merger/deploy keys merely because role names appear in the example. An eventual human-authorized extension must use a separate App, executor, permissions review, and explicit policy grants without bypassing branch or environment protections.
 
+The optional [merge-when-green flow](POLICY.md#opt-in-merge) stays in the coder role. A human may deliberately add coder `merge` and authorize it, accepting that this expands the coder credential's permitted use. It does not borrow a merger grant or key. Leave that grant absent when strict coding/merging separation is required; human-only merge remains the default.
+
 ## Permissions by role
 
-The coder App needs metadata read, contents write for authorized feature branches, and pull requests write for draft PRs. Issues write is optional for approved comment/label handlers; the publisher's installation token only requests contents and pull requests write. Keep repositories explicitly selected and retain human review and merge controls.
+The coder App needs metadata read, contents write for authorized feature branches, and pull requests write for draft PRs. Issues write is optional for approved comment/label handlers. Normal publishing requests only contents and pull requests write; the opt-in merge flag also requests Checks read-only. Keep repositories explicitly selected and retain required human reviews and merge controls.
 
 GitHub does not expose a separate draft-only or merge-only version of pull requests write. A coder token may technically call broader endpoints than the helper permits. Do not put the coder App on branch-rule bypass lists; restrict protected-branch updates and merges to authorized humans. Separate Apps reduce shared-key exposure but do not replace these controls.
 

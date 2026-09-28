@@ -1,6 +1,6 @@
 ---
 name: signed-bot-commit
-description: Use when an agent is authorized to commit, push a feature branch, or create a draft PR. Require scripts/agent-pr.mjs for GitHub App bot identity and provenance; never use raw git commit or push.
+description: Use when an agent is authorized to publish a feature branch or explicitly merge when green. Require scripts/agent-pr.mjs for App bot identity, provenance, and policy-gated merging; never use raw git commit or push.
 ---
 
 # Signed bot commit
@@ -13,11 +13,11 @@ Never recommend the maintainer's `r4yharris-agent-coder` App for private or prod
 
 ## Do
 
-1. Read `AGENTS.md`, load the root policy through `scripts/load-agent-policy.mjs`, and follow `skills/agent-policy/SKILL.md`. Require coder `commit_branch` and `open_pr`, then confirm the human authorized **commit, push, and draft PR creation**. Missing or denied policy means stop. A request to stop after editing or testing prohibits running the helper.
+1. Read `AGENTS.md`, load the root policy through `scripts/load-agent-policy.mjs`, and follow `skills/agent-policy/SKILL.md`. Require coder `commit_branch` and `open_pr`, then confirm the human authorized **commit, push, and draft PR creation**. The optional merge flag also requires coder `merge` and human authorization for merge and branch cleanup. Missing or denied policy means stop. A request to stop after editing or testing prohibits running the helper.
 2. Use only `node scripts/agent-pr.mjs` from the repository root. Do not run raw `git commit`, `git push`, or a separate `gh pr create`; do not fall back to a human identity or credentials.
 3. Confirm Node 20+, Git, and `gh` are available. The human supplies `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` through the environment; CI uses the `GITHUB_APP_PRIVATE_KEY` secret through an approved temporary-file bootstrap. Never read the PEM into chat, display tokens, or commit `.env` or private-key files. The helper does not load `.env` automatically. Missing App configuration means stop, not use the signed-in human.
 4. Review the staged changes, or select individual repository files with `--files`. Do not pass directories. The helper refuses unrelated staged files when explicit files are selected. Run `node --test tests/*.test.mjs` before publishing.
-5. Keep the current branch an unprotected feature branch. The helper uses only origin's repository, checks branch protection and active rules, and never force-pushes, merges, or deploys. Require `check-agent-trailers` and human approval on protected branches, grant the App no bypass, and leave merging to humans.
+5. Keep the current branch an unprotected feature branch. The helper uses only origin's repository, checks branch protection and active rules, and never force-pushes, pushes main, or deploys. Require `check-agent-trailers` and required human reviews on protected branches, grant the App no bypass, and leave merging to humans unless the opt-in flow below is explicitly authorized.
 
 ## Identity and trailers
 
@@ -50,16 +50,31 @@ node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --files READ
 
 `--help` does not read policy, the key, or contact GitHub. Normal invocation first requires the local coder grants, then signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. After checking the approved policy and branch protections, it makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
 
+## Merge when green
+
+Before this flag works, a **human must allow merge in `agent-policy.yml`** by adding `merge` to `roles.coder.allow`, the schema's equivalent of "merge: allow". A literal `merge: allow` field is invalid. The human must publish the grant on the default branch and include it in the feature branch. Do not change or commit the policy yourself.
+
+The configured App also needs Checks read-only permission, and the repository must allow merge commits without bypass. No merger-role override or separate merger key is used. After explicit human authorization for publication, merge, and remote-branch deletion:
+
+```bash
+node scripts/load-agent-policy.mjs --role coder --capability merge
+node scripts/agent-pr.mjs --message "fix: validate input" --merge-when-green --files README.md
+```
+
+The helper waits for `check-agent-trailers` from GitHub Actions to succeed on the exact published PR head SHA. It may mark a green draft ready, then rechecks head, checks, and mergeability. It never self-approves; required reviews and repository rules still apply. Polling is bounded to approximately ten minutes; failed checks, changed SHAs, policy revocation, and API errors stop the flow.
+
+With a clean, mergeable PR and a still-valid grant, it requests a merge commit using the expected head SHA, then deletes the remote feature branch only after confirmed success and an unchanged-branch check. No squash, rebase merge, direct push to main, force push, or GitHub auto-merge is used. The local branch is retained. Without the flag, publication never merges, even if policy allows it.
+
 ## Failure handling
 
-If authentication, signing policy, staging, commit, push, or PR creation fails, stop. Do not use raw Git or a human token to work around the failure. A push or PR error can leave the local commit in place; inspect the branch and existing PR before any retry so the same work is not committed twice. Ask the human to handle a partial publication when needed. The script withholds child-process output to avoid exposing secrets.
+If authentication, policy, staging, commit, push, PR creation, merge, or branch cleanup fails, stop. Do not use raw Git or a human token to work around the failure. A push or PR error can leave the local commit in place; a timeout can leave a draft ready; a cleanup error can leave a merged PR and remote branch. Inspect existing state before any retry so the same work is not committed twice or new branch work deleted. Ask the human to handle a partial publication when needed. The script withholds child-process output to avoid exposing secrets.
 
 Despite this skill's name, the current helper creates **unsigned Git commits**. Its signed JWT authenticates the App, not the Git commit. Do not invoke it in a repository requiring signed commits until the helper supports that policy; never claim that bot fields or trailers alone produce a Verified signature.
 
 ## Do not
 
 - Commit as R4yHarris or another human, including during bootstrap. A human can commit a bootstrap slice themselves.
-- Force-push any branch or merge a PR.
+- Force-push, push main, self-approve, squash, rebase-merge, or enable GitHub auto-merge. Never merge without the authorized policy-gated flag.
 - Deploy, switch to a merger/deploy App, or use a policy grant to bypass the coder helper's fixed capabilities.
 - Edit, replace, or delete root `agent-policy.yml` to grant yourself rights or publish a policy change through this helper.
 - Amend someone else's commit.

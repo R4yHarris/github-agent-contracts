@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { createPrivateKey, KeyObject, sign } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { checkMessage } from "./check-agent-trailers.mjs";
 import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy, requireCapability } from "./load-agent-policy.mjs";
@@ -65,7 +66,7 @@ async function githubRequest(path, token, { method = "GET", body, fetchImpl = gl
 }
 
 export async function mintInstallationToken(
-  { appId, privateKey, owner, repository },
+  { appId, privateKey, owner, repository, readChecks = false },
   { fetchImpl = globalThis.fetch, now = Date.now() } = {},
 ) {
   const jwt = createAppJwt(appId, privateKey, now);
@@ -79,9 +80,11 @@ export async function mintInstallationToken(
   ) {
     throw new AgentPrError("The repository needs an active installation matching GITHUB_APP_ID.");
   }
+  const permissions = { contents: "write", pull_requests: "write" };
+  if (readChecks) permissions.checks = "read";
   const access = await githubRequest(`/app/installations/${installation.id}/access_tokens`, jwt, {
     method: "POST",
-    body: { repositories: [repository], permissions: { contents: "write", pull_requests: "write" } },
+    body: { repositories: [repository], permissions },
     fetchImpl,
   });
   if (
@@ -139,6 +142,8 @@ export function parseArgs(argv) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       options.help = true;
+    } else if (argument === "--merge-when-green") {
+      options.mergeWhenGreen = true;
     } else if (argument === "--files") {
       options.files = argv.slice(index + 1);
       if (!options.files.length || options.files.some((file) => file.startsWith("--"))) {
@@ -152,7 +157,7 @@ export function parseArgs(argv) {
       }
       options[argument === "--model" ? "model" : "message"] = value;
     } else if (["--merge", "--push-protected", "--push_protected", "--deploy"].includes(argument)) {
-      throw new AgentPrError("agent-pr is coder-only: merge, push_protected, and deploy are not implemented. Human-only merge and no deploys remain enforced.");
+      throw new AgentPrError("Use --merge-when-green only with an approved coder merge grant. Protected pushes and deploys are unsupported.");
     } else {
       throw new AgentPrError("Unknown argument; use --help for usage.");
     }
@@ -198,6 +203,65 @@ function runCommand(command, args, options) {
   });
 }
 
+async function readReviewedPolicy(repoPath, defaultBranch, token, fetchImpl) {
+  const file = await githubRequest(`${repoPath}/contents/agent-policy.yml?ref=${encodeURIComponent(defaultBranch)}`, token, { fetchImpl });
+  if (file?.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string" || file.content.length > 100_000) {
+    throw new AgentPrError("Cannot verify agent-policy.yml on the default branch; refusing publication.");
+  }
+  return parseAgentPolicy(Buffer.from(file.content, "base64").toString("utf8"));
+}
+
+async function waitForGreenPullRequest({
+  repoPath, slug, branch, defaultBranch, headSha, pullNumber, token,
+  fetchImpl, invoke, baseEnv, checkMergePolicy, wait, clock,
+}) {
+  const deadline = clock() + 600_000;
+  let markedReady = false;
+  for (let attempt = 0; attempt < 120 && clock() < deadline; attempt += 1) {
+    await checkMergePolicy();
+    const pull = await githubRequest(`${repoPath}/pulls/${pullNumber}`, token, { fetchImpl });
+    if (
+      pull?.number !== pullNumber || pull.state !== "open" || pull.merged !== false || typeof pull.draft !== "boolean" ||
+      pull.head?.sha !== headSha || pull.head.ref !== branch || pull.head.repo?.full_name?.toLowerCase() !== slug.toLowerCase() ||
+      pull.base?.ref !== defaultBranch || pull.base.repo?.full_name?.toLowerCase() !== slug.toLowerCase()
+    ) {
+      throw new AgentPrError("The open PR no longer matches the published head SHA, branch, and repository; refusing to merge.");
+    }
+    const checks = await githubRequest(`${repoPath}/commits/${headSha}/check-runs?check_name=check-agent-trailers&filter=latest&per_page=100`, token, { fetchImpl });
+    if (!Array.isArray(checks?.check_runs) || checks.total_count !== checks.check_runs.length || checks.total_count > 100) {
+      throw new AgentPrError("Cannot verify the complete check-agent-trailers results; refusing to merge.");
+    }
+    let green = checks.check_runs.length > 0;
+    for (const check of checks.check_runs) {
+      if (check?.name !== "check-agent-trailers" || check.head_sha !== headSha || check.app?.slug !== "github-actions") {
+        throw new AgentPrError("check-agent-trailers must be a GitHub Actions check on the exact published head SHA.");
+      }
+      if (check.status === "completed") {
+        if (check.conclusion !== "success") {
+          throw new AgentPrError("check-agent-trailers did not succeed on the head SHA; no merge was attempted.");
+        }
+      } else if (["queued", "in_progress", "waiting", "requested", "pending"].includes(check.status)) {
+        green = false;
+      } else {
+        throw new AgentPrError("check-agent-trailers returned an unrecognized status; refusing to merge.");
+      }
+    }
+    if (green) {
+      if (pull.draft && !markedReady) {
+        invoke("gh", ["pr", "ready", String(pullNumber), "--repo", slug], "Marking draft PR ready", { env: { ...baseEnv, GH_TOKEN: token } });
+        markedReady = true;
+        continue;
+      }
+      if (!pull.draft && pull.mergeable === true && pull.mergeable_state === "clean") return;
+      if (pull.mergeable === false || pull.mergeable_state === "dirty") {
+        throw new AgentPrError("The PR is not mergeable; resolve conflicts without bypassing repository rules.");
+      }
+    }
+    if (attempt < 119) await wait(5_000);
+  }
+  throw new AgentPrError("Timed out waiting for successful head-SHA checks and repository merge requirements; the PR and branch were left in place.");
+}
+
 export async function publishAgentPr(options, {
   cwd = process.cwd(),
   env = process.env,
@@ -205,11 +269,14 @@ export async function publishAgentPr(options, {
   readPrivateKey = (path) => readFileSync(path),
   loadPolicy = loadAgentPolicy,
   run = runCommand,
+  wait = delay,
+  clock = Date.now,
   now = Date.now(),
 } = {}) {
   const policy = loadPolicy({ cwd });
   requireCapability(policy, "coder", "commit_branch");
   requireCapability(policy, "coder", "open_pr");
+  if (options.mergeWhenGreen) requireCapability(policy, "coder", "merge");
   validateCommitInput(options.message, options.model);
   const appId = env.GITHUB_APP_ID;
   if (!appId || !/^[1-9][0-9]*$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY_PATH) {
@@ -294,7 +361,7 @@ export async function publishAgentPr(options, {
     } catch {
       throw new AgentPrError("Could not load the App private key from GITHUB_APP_PRIVATE_KEY_PATH.");
     }
-    ({ token, appSlug } = await mintInstallationToken({ ...origin, appId, privateKey: key }, { fetchImpl, now }));
+    ({ token, appSlug } = await mintInstallationToken({ ...origin, appId, privateKey: key, readChecks: options.mergeWhenGreen === true }, { fetchImpl, now }));
   } finally {
     if (Buffer.isBuffer(key)) key.fill(0);
     key = undefined;
@@ -304,6 +371,7 @@ export async function publishAgentPr(options, {
   let result;
   let failure;
   let committed = false;
+  let merged = false;
   try {
     const botName = `${appSlug}[bot]`;
     const bot = await githubRequest(`/users/${encodeURIComponent(botName)}`, token, { fetchImpl });
@@ -320,16 +388,10 @@ export async function publishAgentPr(options, {
       throw new AgentPrError("GitHub did not return an active repository matching origin.");
     }
     if (branch === repository.default_branch) throw new AgentPrError("Refusing to publish directly to the default branch.");
-    const approvedFile = await githubRequest(`${repoPath}/contents/agent-policy.yml?ref=${encodeURIComponent(repository.default_branch)}`, token, { fetchImpl });
-    if (
-      approvedFile?.type !== "file" || approvedFile.encoding !== "base64" ||
-      typeof approvedFile.content !== "string" || approvedFile.content.length > 100_000
-    ) {
-      throw new AgentPrError("Cannot verify agent-policy.yml on the default branch; refusing publication.");
-    }
-    const approvedPolicy = parseAgentPolicy(Buffer.from(approvedFile.content, "base64").toString("utf8"));
+    const approvedPolicy = await readReviewedPolicy(repoPath, repository.default_branch, token, fetchImpl);
     requireCapability(approvedPolicy, "coder", "commit_branch");
     requireCapability(approvedPolicy, "coder", "open_pr");
+    if (options.mergeWhenGreen) requireCapability(approvedPolicy, "coder", "merge");
     const verifyApprovedPolicy = (candidate) => {
       for (const role of Object.keys(approvedPolicy.roles)) {
         const approved = approvedPolicy.roles[role].allow;
@@ -404,7 +466,8 @@ export async function publishAgentPr(options, {
         GIT_CONFIG_KEY_7: "protocol.https.allow", GIT_CONFIG_VALUE_7: "always",
       },
     });
-    const pullRequests = await githubRequest(`${repoPath}/pulls?state=open&head=${encodeURIComponent(`${origin.owner}:${branch}`)}`, token, { fetchImpl });
+    const pullRequestPath = `${repoPath}/pulls?state=open&head=${encodeURIComponent(`${origin.owner}:${branch}`)}`;
+    const pullRequests = await githubRequest(pullRequestPath, token, { fetchImpl });
     if (!Array.isArray(pullRequests)) throw new AgentPrError("GitHub returned an invalid pull-request list.");
     if (!pullRequests.length) {
       const subject = message.split("\n")[0];
@@ -415,9 +478,46 @@ export async function publishAgentPr(options, {
       ], "Draft pull-request creation", { env: { ...baseEnv, GH_TOKEN: token } });
     }
     result = { commit: actual[0], botName, createdPullRequest: !pullRequests.length };
+    if (options.mergeWhenGreen) {
+      const candidates = pullRequests.length ? pullRequests : await githubRequest(pullRequestPath, token, { fetchImpl });
+      if (!Array.isArray(candidates) || candidates.length !== 1 || !Number.isSafeInteger(candidates[0]?.number) || candidates[0].number <= 0) {
+        throw new AgentPrError("Expected exactly one open PR for the published feature branch; refusing to merge.");
+      }
+      const pullNumber = candidates[0].number;
+      const checkMergePolicy = async () => {
+        const currentPolicy = loadPolicy({ cwd });
+        requireCapability(currentPolicy, "coder", "merge");
+        verifyApprovedPolicy(currentPolicy);
+        const currentReviewedPolicy = await readReviewedPolicy(repoPath, repository.default_branch, token, fetchImpl);
+        requireCapability(currentReviewedPolicy, "coder", "merge");
+        verifyApprovedPolicy(currentReviewedPolicy);
+      };
+      await waitForGreenPullRequest({
+        repoPath, slug, branch, defaultBranch: repository.default_branch, headSha: actual[0], pullNumber, token,
+        fetchImpl, invoke, baseEnv, checkMergePolicy, wait, clock,
+      });
+      await checkMergePolicy();
+      const mergeResult = await githubRequest(`${repoPath}/pulls/${pullNumber}/merge`, token, {
+        method: "PUT", body: { sha: actual[0], merge_method: "merge", commit_message: message }, fetchImpl,
+      });
+      if (mergeResult?.merged !== true || !/^[0-9a-f]{40}$/i.test(mergeResult.sha)) {
+        throw new AgentPrError("GitHub did not confirm a successful merge; the feature branch was not deleted.");
+      }
+      merged = true;
+      await checkProtectedBranch();
+      const reference = await githubRequest(`${repoPath}/git/ref/heads/${encodeURIComponent(branch)}`, token, { fetchImpl, allowMissing: true });
+      if (reference !== undefined) {
+        if (reference?.ref !== `refs/heads/${branch}` || reference.object?.type !== "commit" || reference.object.sha !== actual[0]) {
+          throw new AgentPrError("The remote feature branch changed after merging; it was not deleted.");
+        }
+        await githubRequest(`${repoPath}/git/refs/heads/${encodeURIComponent(branch)}`, token, { method: "DELETE", fetchImpl });
+      }
+      result = { ...result, merged: true, pullRequest: pullNumber, mergeCommit: mergeResult.sha, remoteBranchDeleted: true };
+    }
   } catch (error) {
     const detail = error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "Publication failed; details were withheld to protect credentials.";
-    failure = new AgentPrError(`${detail}${committed ? " The local commit remains; do not create a duplicate commit to retry." : ""}`);
+    const state = merged ? " The PR was merged; remote-branch cleanup may be incomplete. Inspect it before retrying." : committed ? " The local commit remains; do not create a duplicate commit to retry." : "";
+    failure = new AgentPrError(`${detail}${state}`);
   } finally {
     try {
       await githubRequest("/installation/token", token, { method: "DELETE", fetchImpl });
@@ -439,15 +539,18 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
     return 2;
   }
   if (options.help) {
-    stdout.write(`Usage: node scripts/agent-pr.mjs --message TEXT [--model NAME] [--files PATH ...]
+    stdout.write(`Usage: node scripts/agent-pr.mjs --message TEXT [--model NAME] [--merge-when-green] [--files PATH ...]
 
 Without --files, commits the reviewed staged changes. --files must be last.
 Requires Node 20+, Git, gh, GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY_PATH.
 Requires root agent-policy.yml with coder commit_branch and open_pr grants,
 matching the reviewed policy on origin's default branch. No example fallback.
 Discovers your configured App's bot identity, pushes the current feature branch to origin,
-and creates a draft PR only when no open PR exists. Never force-pushes or merges.
-No role/policy override, merge, push_protected, or deploy flags are supported.
+and creates a draft PR only when no open PR exists. Never force-pushes or pushes main.
+--merge-when-green additionally requires coder.merge in local and reviewed policy,
+plus App Checks read permission. Waits for a successful check-agent-trailers on the
+exact head SHA, marks drafts ready, merges with a merge commit, then deletes that branch.
+No self-approval, squash, role/policy override, protected push, deploy, or auto-merge mode.
 An invocation authorizes commit, push, and PR creation. Keep secrets out of arguments.
 `);
     return 0;
@@ -456,6 +559,7 @@ An invocation authorizes commit, push, and PR creation. Keep secrets out of argu
     const result = await publishAgentPr(options, dependencies);
     stdout.write(`Committed ${result.commit.slice(0, 7)} as ${result.botName} and pushed to origin.\n`);
     stdout.write(result.createdPullRequest ? "Created a draft pull request.\n" : "Updated the branch for its existing pull request.\n");
+    if (result.merged) stdout.write(`Merged PR #${result.pullRequest} with a merge commit and removed its remote feature branch.\n`);
     return 0;
   } catch (error) {
     stderr.write(`${error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);
