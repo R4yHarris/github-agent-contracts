@@ -15,7 +15,7 @@ Build only this. Stop when the checklist is green.
    - `skills/github-mcp-allowlist/SKILL.md`
    - `skills/pr-safe-outputs/SKILL.md`
 8. One `gh-aw` **source** workflow: `.github/workflows-src/issue-clarifier.md` (read-all, `safe-outputs.add-comment` only).
-9. `.env.example` listing names of env vars only (`APP_ID`, `APP_INSTALLATION_ID`, empty values).
+9. `.env.example` listing names of env vars only (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, empty values).
 
 ## Out
 

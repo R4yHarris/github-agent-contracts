@@ -1,27 +1,28 @@
 # GitHub App agent identity
 
-Give each agent role its own GitHub App so commits and API calls are not your human account.
+Use a GitHub App owned by the consuming user or organization so agent commits and API calls are distinct from the signed-in human. The App authenticates to GitHub; the security control is the required PR check, protected branch, bot author, and trailers.
 
 ## Why
 
 Git author/committer fields that copy a human hide provenance. GitHub Apps create a `slug[bot]` identity, the same pattern Dependabot uses.
 
-## Day-1 setup (manual, outside this repo)
+## Manifest-first setup
 
-1. Open GitHub Settings, Developer settings, GitHub Apps, then New GitHub App.
-2. Name it for a **role**, not a person: `agent-coder`, `agent-reviewer`.
-3. Homepage URL can be this repository.
-4. Webhook: inactive for day 1.
-5. Start with repository contents, pull requests, issues, and metadata **read-only**. Leave unrelated permissions disabled.
-6. Install the App on **one selected repository**, not all repositories.
-7. Record its App ID and installation ID as `APP_ID` and `APP_INSTALLATION_ID`. The [.env.example](../.env.example) template contains only empty, non-secret identifiers.
-8. Keep the App private key in an approved secret manager outside the checkout. Do not put it in git, an agent prompt, or an MCP config.
+Start with [ONBOARDING.md](ONBOARDING.md) and [app-manifest.json](app-manifest.json), using a unique account-specific name ending in `-agent-coder`. Register under the user or organization that owns the repositories. The template is private (`public: false`, Only on this account), with webhooks inactive, no events, and no user OAuth.
 
-For an approved safe-output handler, grant only the needed write permission: issues for comments or labels, pull requests for draft PRs. Keep those write-capable credentials out of the read-only agent process. Contents write is unnecessary for the issue clarifier; any separate branch-publication setup needs explicit human authorization. Never grant administration or repository deletion.
+The manifest requests metadata read and contents, issues, and pull requests write for feature-branch publication and approved outputs. Omit issues write when unused. It grants no administration, secrets, workflows, or organization-member permissions. Keep read-only agent/MCP tokens separate from publication credentials.
+
+Choose **Only select repositories** at installation. GitHub does not support a manifest field for that selection. Start with one repository and separate unrelated trust boundaries.
+
+The file uses placeholder callback URLs, not a live registration endpoint. [GitHub's manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) requires a trusted receiver to exchange the temporary registration code for App configuration. Owner-controlled callback hosting is a follow-on. Until it exists, an owner can manually register with the template's settings. Never send conversion responses or generated secrets to a public page or chat.
+
+Supply only `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` to the publisher. Keep the key outside the checkout. In CI, use `GITHUB_APP_PRIVATE_KEY` as an approved secret and materialize it outside the checkout through a trusted credential step. The helper discovers the installation and bot IDs; neither is another environment input. It does not load `.env` or use client secrets.
+
+Do not install a project-maintainer App on third-party private repositories. The private key holder can mint tokens for all installations of that App, regardless of this helper's narrower request. `r4yharris-agent-coder` is optional only for public playground demos, never the recommended production App. See [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Git identity for commits
 
-Resolve the actual App slug and bot user ID (`GET /users/slug[bot]`); the bot user ID is not the App ID. Use that identity for both the author and committer of new agent commits:
+The publisher resolves the actual App slug from origin's authenticated installation and the bot user ID from `GET /users/slug[bot]`. It verifies the returned login and bot type; the bot user ID is not the App ID. It uses that identity for both the author and committer:
 
 ```text
 user.name  slug[bot]
@@ -30,11 +31,11 @@ user.email ID+slug[bot]@users.noreply.github.com
 
 Use repository-local or per-command Git settings, not global changes. Do not impersonate the supervising human or fabricate a bot user ID. Add the [required provenance trailers](commit-trailers.md); `Co-authored-by` can credit a human without changing the bot identity.
 
-This repository permits human-authored bootstrap commits under its own instructions. That exception does not authorize agents to assume a human identity in consumer repositories.
+This repository permits humans to author bootstrap commits themselves. Agents must use [the publication helper](../scripts/agent-pr.mjs), never a human identity or raw Git publication commands, including during bootstrap.
 
 ## Installation tokens
 
-An operator or trusted credential service signs a short-lived App JWT outside the agent workspace, then requests `POST /app/installations/{APP_INSTALLATION_ID}/access_tokens`. Restrict the request to the selected repository and read-only agent permissions, for example:
+An approved publisher or credential service signs a short-lived App JWT, discovers the repository installation, then requests `POST /app/installations/{installation_id}/access_tokens`. Restrict each token to the selected repository and its task. Read-only agent/MCP access uses permissions such as:
 
 ```json
 {
@@ -57,12 +58,16 @@ The caller must enforce the approved owner and repository on every tool call. An
 
 Unsigned Git commits are acceptable for day 1 unless a consumer repository requires signing. Bot author fields and trailers do not produce a GitHub **Verified** signature and are not cryptographic proof of identity.
 
-For an explicitly unsigned commit, use `git -c commit.gpgsign=false commit` with the bot identity and a checked message. SSH signing may be used when an operator has already provisioned an approved signing key and verification policy outside this repository. Do not generate keys here, reuse an App private key for Git signing, or bypass a consumer's signing requirement.
+The publication helper currently makes explicitly unsigned Git commits. Its signed App JWT authenticates API calls, not the Git commit. Do not invoke it if a consumer requires signing; an operator must first arrange supported signing without bypassing that policy. Do not generate keys here or reuse an App private key for Git signing.
 
 ## Publication
 
 Creating a local commit does not authorize a push. Default GitHub writes are approved safe outputs: comments, labels, and draft PRs. Any separately authorized branch publication must use a repository-scoped installation token, must not force-push, and must leave merging to a human.
 
+For authorized publication, use [scripts/agent-pr.mjs](../scripts/agent-pr.mjs) as described in the [commit skill](../skills/signed-bot-commit/SKILL.md). It loads `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the environment, verifies origin's installation, derives that App's bot identity, and mints a token with contents and pull requests write for that repository only. It adds `AI-Agent: <app-slug>` and `AI-Model: unknown` unless `--model` is supplied. No `.env` loading, token display, global Git identity changes, or human-token fallback is provided.
+
+Require the `check-agent-trailers` PR check and protected-branch rules with no direct agent pushes or bypass. Pull requests write is not a draft-only permission; humans must retain merge authority. A passing trailer check is not authentication of the Git author or a substitute for those rules.
+
 ## What this repo provides
 
-Documentation, skills, and a local Git-based trailer checker. It does not register Apps, mint tokens, manage keys, or schedule agents.
+Documentation, skills, local Git-based trailer checks, and an explicitly authorized App-authenticated publication helper. It does not register Apps, provision keys, or schedule agents.

@@ -1,8 +1,26 @@
 # github-agent-contracts
 
-GitHub-native contracts for coding agents. **GitHub stays the repository host.** This library does not replace Git, GitHub, or an orchestrator.
+GitHub-native contracts for attributable agent commits and PRs, distinct from human-authored work. **GitHub stays the repository host.** The control is a required PR check, a protected branch, bot authorship, and machine-checked trailers. The App is how agents authenticate to GitHub.
 
 This is community OSS for GitHub, not a GitHub replacement.
+
+## Enable agent identity in 3 steps
+
+1. **[Register App from manifest](docs/app-manifest.json).** Create an App owned by you or your organization, keep it private to that account, and choose **Only select repositories** during installation.
+2. **Configure and copy.** Supply `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` outside git, then copy AGENTS.md, the signed-bot-commit skill, publisher, and check Action/workflow as listed in [ONBOARDING.md](docs/ONBOARDING.md). CI stores the key in the `GITHUB_APP_PRIVATE_KEY` secret.
+3. **Protect and publish.** Require `check-agent-trailers`, disallow direct pushes to `main` and agent bypass, and reserve merges for humans. Tell the agent: "Use signed-bot-commit / scripts/agent-pr.mjs for all publish."
+
+The manifest is a static template, not a hosted registration button. An owner-controlled manifest callback is a follow-on; placeholder URLs must be replaced before completing GitHub's flow. The [onboarding guide](docs/ONBOARDING.md) describes that boundary and the manual registration fallback.
+
+### Create your own App (recommended)
+
+Your account or organization owns the App and controls its private key. No project-maintainer installation is needed. Use the [manifest](docs/app-manifest.json), [harness guide](docs/HARNESSES.md), and [threat model](docs/THREAT_MODEL.md). The App key holder can mint tokens for **every installation of that App**, so installation scope and key custody matter.
+
+### Demo App
+
+`r4yharris-agent-coder` is an optional maintainer demo identity for **public playground repositories only**. Do not install it on private or production repositories or grant it protected-branch bypass. A globally shared maintainer App is not this standard's production onboarding model.
+
+## Shared contracts
 
 Use it so Copilot, [GitHub Agentic Workflows](https://github.com/github/gh-aw), Hermes, Codex, Cursor, and similar tools share one repo-level convention:
 
@@ -21,12 +39,15 @@ Humans can review the same rules agents follow, while commit trailers make claim
 
 ## Consume the contracts
 
-- **Copilot / VS Code:** keep [AGENTS.md](AGENTS.md) at the repository root and [.github/copilot-instructions.md](.github/copilot-instructions.md) in place. Copy selected `skills/<name>/` directories into `.github/skills/` in the consuming repository for skill discovery in supported versions.
+- **Copilot / VS Code:** use [AGENTS.md](AGENTS.md) and [.github/copilot-instructions.md](.github/copilot-instructions.md) only as harness configuration. They reference the common commit skill and publisher; no additional agent mode or skill autodiscovery setup is required.
+- **Claude Code:** use the short [CLAUDE.md](CLAUDE.md) pointer to AGENTS.md, not a duplicate policy.
 - **gh-aw:** include the repository rules and relevant skills in the workflow's instructions. Start with the [issue clarifier source](.github/workflows-src/issue-clarifier.md); the agent is read-only and can request only an `add-comment` safe output.
 - **Hermes, Codex, and other agents:** load `AGENTS.md` as repository instructions and import the selected `SKILL.md` files using that runtime's skill mechanism. Discovery paths differ by runtime; this pack does not patch those runtimes.
 - **GitHub MCP:** use the [allowlist skill](skills/github-mcp-allowlist/SKILL.md) with a repository-scoped GitHub App installation token. Keep the agent's tools read-only; give approved output handlers only the capabilities they need.
 
 Adapt the workspace-specific names in the instruction files when adopting the pack. Human approval, scoped permissions, and tool restrictions enforce boundaries; prompts alone do not.
+
+See [HARNESSES.md](docs/HARNESSES.md) for the minimal integration in each runtime. Any agent that honors AGENTS.md must honor signed-bot-commit.
 
 ## Use in another repo
 
@@ -59,7 +80,7 @@ AI-Model: unknown
 
 The default checks messages containing `AI-Agent:` and GitHub noreply bot authors. Human privacy addresses alone do not trigger a check. For local author detection, pass `--author-email`; `--require` checks every message. Exit codes are `0` (pass), `1` (missing trailers), and `2` (usage or input error).
 
-See the [trailer spec](docs/commit-trailers.md) for parsing rules, limitations, and the Action's `require-on-all-commits: "true"` option.
+See the [trailer spec](docs/commit-trailers.md) for parsing rules and the Action's `require-on-all-commits: "true"` option. The [threat model](docs/THREAT_MODEL.md) explains why trailers and bot fields do not prove authorship, and why unsigned human commits pass the default check.
 
 ## PR workflow
 
@@ -80,6 +101,8 @@ Review the generated workflow and configure the chosen engine's authentication o
 ## Publish a new empty GitHub repo
 
 From the local repository root, after creating an empty GitHub repository:
+
+These bootstrap commands are for a **human**. Agents must use the App-authenticated publication helper and never assume the human's identity.
 
 ```bash
 git init -b main
