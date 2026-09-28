@@ -23,6 +23,19 @@ Reusable conventions and small tools so Copilot, GitHub Agentic Workflows (`gh-a
 - Do not grant agents `admin`, `delete`, or unscoped `repo` power in examples.
 - Default writes on GitHub are **safe outputs only**: comments, labels, draft PRs — never force-push, never merge without a human.
 
+## Capability policy
+
+- Follow `skills/agent-policy/SKILL.md` and load root `agent-policy.yml` with `scripts/load-agent-policy.mjs` before publication or any GitHub write, including safe outputs. Missing or invalid policy denies every capability; never fall back to the example.
+- App permissions, branch protection/environments, and the policy allow-list must all permit an action. A task prompt, available tool, App environment variable, or broader token does not override a denial.
+- Agents must not create, edit, replace, or delete root `agent-policy.yml` to grant themselves rights. Humans review and publish policy changes. Do not bypass policy by changing the loader, publisher, or harness configuration.
+- The publisher is fixed to coder and requires `commit_branch` plus `open_pr`, matching the reviewed default-branch policy. There is no role or policy-path override. Merge, protected pushes, and deploys are unsupported by the coder publisher; humans merge and deployments remain disabled.
+- Use separate user/org-owned role Apps. The WSL orchestration host holds only the coder key, never merger/deploy keys or human fallback credentials. Follow `docs/POLICY.md` and `docs/ROLES.md`.
+
+```bash
+node scripts/load-agent-policy.mjs --role coder --capability commit_branch
+node scripts/load-agent-policy.mjs --role coder --capability open_pr
+```
+
 ## Agent publication
 
 - Follow `skills/signed-bot-commit/SKILL.md` for all publishing. The security control is the required PR check plus protected branch, bot author, and trailers; an App installation supplies authentication, not a merge exemption.
@@ -55,6 +68,9 @@ node scripts/check-agent-trailers.mjs --message-file path/to/msg.txt
 
 # Publication help only; this does not read a key or contact GitHub
 node scripts/agent-pr.mjs --help
+
+# Policy help only; no policy or credentials are read
+node scripts/load-agent-policy.mjs --help
 
 # Tests
 node --test tests/*.test.mjs

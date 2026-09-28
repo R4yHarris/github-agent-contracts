@@ -29,15 +29,20 @@ Copy these files into the consuming repository, preserving paths and merging exi
 
 ```text
 AGENTS.md
+skills/agent-policy/SKILL.md
 skills/signed-bot-commit/SKILL.md
 scripts/agent-pr.mjs
+scripts/load-agent-policy.mjs
 scripts/check-agent-trailers.mjs
 scripts/check-pr-agent-trailers.mjs
+examples/agent-policy.yml
 .github/actions/check-agent-trailers/action.yml
 .github/workflows/check-agent-trailers.yml
 ```
 
 Use Node 20+, Git, and `gh` for publication. Adapt the workspace name and test command in the copied rules. Follow [HARNESSES.md](HARNESSES.md) for the small harness-specific pointers, and [adopt.md](adopt.md) for the pinned public-Action alternative and vendoring details. No private-package infrastructure or runtime dependency installation is needed.
+
+A human must review [the policy example](../examples/agent-policy.yml), install it as root `agent-policy.yml`, and publish it on the default branch through the existing human review process. Include that reviewed version in the feature branch too. Keep merger and deploy allow-lists empty. The publisher requires coder `commit_branch` and `open_pr`, checks the default-branch policy, and refuses root-policy edits; there is no example fallback. See [POLICY.md](POLICY.md) and [ROLES.md](ROLES.md). Copy their guidance with the skills when adopting the pack.
 
 For the local Action, land the Action and both checker scripts on the target branch before enabling the workflow, because it executes the base revision's trusted checker. A human bootstraps workflow changes: the App intentionally has no workflows-write permission. Keep human review on changes to the workflow, instructions, and publisher.
 
@@ -51,7 +56,7 @@ After a successful trial PR run, configure branch protection or a ruleset for `m
 
 Tell the agent:
 
-> Use signed-bot-commit / scripts/agent-pr.mjs for all publish. Never publish as the signed-in human, print tokens, or merge. Stop if App authentication is unavailable.
+> Load agent-policy first, then use signed-bot-commit / scripts/agent-pr.mjs for all publish. Never grant yourself policy rights, publish as the signed-in human, print tokens, merge, or deploy. Stop if policy or App authentication is unavailable.
 
 Authorize a specific feature-branch publication, then let the agent use the helper. Check the bot author/committer and trailers on the resulting commits. The helper creates a draft PR or reuses an existing open PR. **Humans review and merge.** Local commits do not independently authorize a push.
 
