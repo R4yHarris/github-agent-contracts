@@ -10,7 +10,7 @@ Git author/committer fields that copy a human hide provenance. GitHub Apps creat
 
 Start with [ONBOARDING.md](ONBOARDING.md) and [app-manifest.json](app-manifest.json), using a unique account-specific name ending in `-agent-coder`. Register under the user or organization that owns the repositories. The template is private (`public: false`, Only on this account), with webhooks inactive, no events, and no user OAuth.
 
-The manifest requests metadata read and contents, issues, and pull requests write for feature-branch publication and approved outputs. Omit issues write when unused. It grants no administration, secrets, workflows, or organization-member permissions. Keep read-only agent/MCP tokens separate from publication credentials.
+The manifest requests repository permissions Metadata read, Checks read-only, and Contents, Issues, and Pull requests read-write for feature-branch publication, optional merge checks, and approved outputs. Omit Issues write when unused. It grants no Administration, Secrets, Workflows, Actions, or Deployments permissions. A human must accept the Checks permission change for an existing installation before using opt-in merge. Keep read-only agent/MCP tokens separate from publication credentials.
 
 Choose **Only select repositories** at installation. GitHub does not support a manifest field for that selection. Start with one repository and separate unrelated trust boundaries.
 
@@ -62,11 +62,11 @@ The publication helper currently makes explicitly unsigned Git commits. Its sign
 
 ## Publication
 
-Creating a local commit does not authorize a push. Default GitHub writes are approved safe outputs: comments, labels, and draft PRs. Any separately authorized branch publication must use a repository-scoped installation token, must not force-push, and must leave merging to a human.
+Creating a local commit does not authorize a push. Default GitHub writes are approved safe outputs: comments, labels, and draft PRs. Any separately authorized branch publication must use a repository-scoped installation token and must not force-push. Human-only merge is the default; the explicitly authorized, policy-gated `--merge-when-green` flow is the exception.
 
-For authorized publication, use [scripts/agent-pr.mjs](../scripts/agent-pr.mjs) as described in the [commit skill](../skills/signed-bot-commit/SKILL.md). It loads `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the environment, verifies origin's installation, derives that App's bot identity, and mints a token with contents and pull requests write for that repository only. It adds `AI-Agent: <app-slug>` and `AI-Model: unknown` unless `--model` is supplied. No `.env` loading, token display, global Git identity changes, or human-token fallback is provided.
+For authorized publication, use [scripts/agent-pr.mjs](../scripts/agent-pr.mjs) as described in the [commit skill](../skills/signed-bot-commit/SKILL.md). It loads `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the environment, verifies origin's installation, derives that App's bot identity, and mints a token with contents and pull requests write for that repository only; the merge flag additionally requests Checks read. It adds `AI-Agent: <app-slug>` and `AI-Model: unknown` unless `--model` is supplied. No `.env` loading, token display, global Git identity changes, or human-token fallback is provided. Staged or selected `.github/workflows/**` paths are refused before token minting; humans publish workflow changes.
 
-Require the `check-agent-trailers` PR check and protected-branch rules with no direct agent pushes or bypass. Pull requests write is not a draft-only permission; humans must retain merge authority. A passing trailer check is not authentication of the Git author or a substitute for those rules.
+Require the `check-agent-trailers` PR check and protected-branch rules with no direct agent pushes or bypass. Pull requests write is not a draft-only permission; keep human review and branch rules even for opt-in merge. A passing trailer check is not authentication of the Git author or a substitute for those rules. The policy's `merger.merge` gate does not select an App credential; a trusted launcher/operator must disable merge on coder-only WSL and use a separately approved merger App/context.
 
 ## What this repo provides
 

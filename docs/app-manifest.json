@@ -11,6 +11,7 @@
   "request_oauth_on_install": false,
   "default_permissions": {
     "metadata": "read",
+    "checks": "read",
     "contents": "write",
     "issues": "write",
     "pull_requests": "write"

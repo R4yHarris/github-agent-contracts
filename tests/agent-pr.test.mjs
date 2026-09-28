@@ -242,13 +242,29 @@ test("missing, invalid, or insufficient local policy denies publication before c
   }
 });
 
-test("--merge-when-green is opt-in and requires the current coder role to allow merge", async () => {
+test("workflow files in the index or explicit paths require human publication before key or token access", async () => {
+  for (const file of [".github/workflows/check-agent-trailers.yml", ".github/workflows/nested/ci.yml"]) {
+    for (const options of [{}, { files: [file] }]) {
+      const mock = mockPublication({ staged: [file] });
+      await assert.rejects(publishAgentPr({ message: "feat: helper", ...options }, mock.dependencies), /A human must publish changes under \.github\/workflows\//);
+      assert.equal(mock.keyReads(), 0);
+      assert.equal(mock.requests.length, 0);
+      assert.ok(!mock.commands.some((call) => call.args[0] === "add" || call.args.includes("commit") || call.args[0] === "push"));
+    }
+  }
+  const explicit = mockPublication({ staged: ["README.md"] });
+  await assert.rejects(publishAgentPr({ message: "feat: helper", files: [".github/workflows/new.yml"] }, explicit.dependencies), /A human must publish/);
+  assert.equal(explicit.keyReads(), 0);
+  assert.equal(explicit.requests.length, 0);
+});
+
+test("--merge-when-green is opt-in and requires the merger role even if coder.merge is granted", async () => {
   assert.equal(parseArgs(["--message", "feat: helper", "--merge-when-green"]).mergeWhenGreen, true);
   assert.equal(parseArgs(["--message", "feat: helper"]).mergeWhenGreen, undefined);
-  for (const source of [policySource, policySource.replace(/merger:\r?\n    allow: \[\]/, "merger:\n    allow: [merge]")]) {
+  for (const source of [policySource, policySource.replace("comment, label", "comment, label, merge")]) {
     const mock = mockPublication();
     mock.dependencies.loadPolicy = () => parseAgentPolicy(source);
-    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies merger\.merge/);
     assert.equal(mock.keyReads(), 0);
     assert.equal(mock.commands.length, 0);
     assert.equal(mock.requests.length, 0);
@@ -257,15 +273,15 @@ test("--merge-when-green is opt-in and requires the current coder role to allow 
 
 test("--merge-when-green also requires merge in the reviewed default-branch policy", async () => {
   const mock = mockPublication();
-  mock.dependencies.loadPolicy = () => parseAgentPolicy(policySource.replace("comment, label", "comment, label, merge"));
-  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  mock.dependencies.loadPolicy = () => parseAgentPolicy(policySource.replace(/merger:\r?\n    allow: \[\]/, "merger:\n    allow: [merge]"));
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies merger\.merge/);
   assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
   assert.equal(mock.requests.at(-1).method, "DELETE");
 });
 
 function mockMergePublication({ draft = false, existing = true, checkRuns } = {}) {
   const mock = mockPublication({ pullRequests: existing ? [{ number: 7 }] : [] });
-  const source = policySource.replace("comment, label", "comment, label, merge");
+  const source = policySource.replace(/merger:\r?\n    allow: \[\]/, "merger:\n    allow: [merge]");
   const pull = {
     number: 7, state: "open", merged: false, draft, mergeable: true, mergeable_state: "clean",
     head: { sha: commitSha, ref: "feat/bot-helper", repo: { full_name: repository.full_name } },
@@ -280,6 +296,14 @@ function mockMergePublication({ draft = false, existing = true, checkRuns } = {}
   const originalRun = mock.dependencies.run;
   mock.dependencies.run = (command, args, options) => {
     if (command === "gh" && args[1] === "ready") pull.draft = false;
+    if (args[0] === "rev-parse" && args[1] === "--verify") return commitSha;
+    if (args[0] === "status") return "";
+    if (["fetch", "switch", "merge", "merge-base", "update-ref"].includes(args[0])) {
+      mock.commands.push({ command, args, ...options });
+      if (args[0] === "switch") mock.dependencies.runBranch = args.at(-1);
+      return "";
+    }
+    if (args[0] === "symbolic-ref" && mock.dependencies.runBranch) return mock.dependencies.runBranch;
     const output = originalRun(command, args, options);
     return args[0] === "show" ? source : output;
   };
@@ -308,6 +332,8 @@ test("--merge-when-green merges a ready or draft PR by exact SHA and only then d
     const result = await publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies);
     assert.equal(result.merged, true);
     assert.equal(result.remoteBranchDeleted, true);
+    assert.equal(result.localBranchDeleted, true);
+    assert.equal(result.checkedOutBranch, "main");
     assert.equal(result.mergeCommit, "b".repeat(40));
     const merge = mock.requests.find((call) => call.url.endsWith("/pulls/7/merge"));
     assert.equal(merge.method, "PUT");
@@ -318,11 +344,85 @@ test("--merge-when-green merges a ready or draft PR by exact SHA and only then d
     assert.equal(deletion.method, "DELETE");
     assert.ok(deletion.url.endsWith("/git/refs/heads/feat%2Fbot-helper"));
     assert.ok(mock.requests.indexOf(deletion) > mock.requests.indexOf(merge));
+    const fetch = mock.commands.find((call) => call.args[0] === "fetch");
+    assert.deepEqual(fetch.args, ["fetch", "--no-tags", "https://github.com/example-owner/example-repo.git", "refs/heads/main:refs/remotes/origin/main"]);
+    assert.equal(fetch.env.GIT_CONFIG_VALUE_4, mock.commands.find((call) => call.args[0] === "push").env.GIT_CONFIG_VALUE_4);
+    assert.deepEqual(mock.commands.filter((call) => ["switch", "merge", "merge-base", "update-ref"].includes(call.args[0])).map((call) => call.args), [
+      ["switch", "--", "main"], ["merge", "--ff-only", "refs/remotes/origin/main"],
+      ["merge-base", "--is-ancestor", commitSha, "HEAD"], ["update-ref", "-d", "refs/heads/feat/bot-helper", commitSha],
+    ]);
     assert.equal(mock.commands.some((call) => call.command === "gh" && call.args[1] === "ready"), setup.draft === true);
     assert.ok(!mock.commands.some((call) => call.args.some((argument) => ["--approve", "--squash", "--force", "--admin", "--auto"].includes(argument))));
     assert.ok(mock.commands.filter((call) => call.args[0] === "push").every((call) => call.args.at(-1).endsWith(":refs/heads/feat/bot-helper")));
     assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
   }
+});
+
+test("local cleanup stops on staged, unstaged, or untracked worktree changes", async () => {
+  for (const dirt of ["M  staged.txt\0", " M unstaged.txt\0", "?? untracked.txt\0"]) {
+    const mock = mockMergePublication();
+    const originalRun = mock.dependencies.run;
+    mock.dependencies.run = (command, args, options) => args[0] === "status" ? dirt : originalRun(command, args, options);
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /PR #7 was merged; the remote feature branch was removed, but local cleanup is incomplete/);
+    assert.ok(!mock.commands.some((call) => ["fetch", "switch", "merge", "update-ref"].includes(call.args[0])));
+    assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
+  }
+});
+
+test("local cleanup stops if the feature SHA changes after the authenticated fetch", async () => {
+  const mock = mockMergePublication();
+  const originalRun = mock.dependencies.run;
+  let fetched = false;
+  mock.dependencies.run = (command, args, options) => {
+    if (args[0] === "fetch") fetched = true;
+    if (fetched && args[0] === "rev-parse" && args[1] === "--verify") return "c".repeat(40);
+    return originalRun(command, args, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /published feature SHA changed; local cleanup was stopped.*PR #7 was merged/);
+  assert.ok(mock.commands.some((call) => call.args[0] === "fetch"));
+  assert.ok(!mock.commands.some((call) => ["switch", "merge", "update-ref"].includes(call.args[0])));
+});
+
+test("local cleanup stops if the checked-out branch changes during the fetch", async () => {
+  const mock = mockMergePublication();
+  const originalRun = mock.dependencies.run;
+  let fetched = false;
+  mock.dependencies.run = (command, args, options) => {
+    if (args[0] === "fetch") fetched = true;
+    if (fetched && args[0] === "symbolic-ref") return "feat/another-task";
+    return originalRun(command, args, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /local branch or published feature SHA changed; local cleanup was stopped.*PR #7 was merged/);
+  assert.ok(mock.commands.some((call) => call.args[0] === "fetch"));
+  assert.ok(!mock.commands.some((call) => ["switch", "merge", "update-ref"].includes(call.args[0])));
+});
+
+test("a failed fast-forward retains the local feature branch and reports the merged PR", async () => {
+  const mock = mockMergePublication();
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    if (args[0] === "merge") throw new Error(access.token);
+    return originalRun(command, args, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), (error) => {
+    assert.match(error.message, /Default branch fast-forward failed.*PR #7 was merged; the remote feature branch was removed, but local cleanup is incomplete/);
+    assert.ok(!error.message.includes(access.token));
+    return true;
+  });
+  assert.ok(mock.commands.some((call) => call.args[0] === "switch"));
+  assert.ok(!mock.commands.some((call) => call.args[0] === "update-ref"));
+});
+
+test("an advanced feature ref cannot be deleted after the final SHA check", async () => {
+  const mock = mockMergePublication();
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    if (args[0] === "update-ref") throw new Error("ref changed while deleting");
+    return originalRun(command, args, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /Local feature branch deletion failed.*PR #7 was merged; the remote feature branch was removed, but local cleanup is incomplete/);
+  assert.ok(mock.commands.some((call) => call.args[0] === "merge-base"));
+  assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
 });
 
 test("--merge-when-green never attempts a merge or branch deletion when the trailer check is red", async () => {
@@ -392,7 +492,7 @@ test("--merge-when-green respects a merge grant revoked while waiting", async ()
     await originalWait(duration);
     revoked = true;
   };
-  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies merger\.merge/);
   assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge")));
 });
 
@@ -404,7 +504,7 @@ test("--merge-when-green revalidates the reviewed merge grant immediately before
     if (url.includes("/contents/agent-policy.yml") && ++policyReads === 3) return Response.json(approvedPolicyFile);
     return originalFetch(url, options);
   };
-  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies merger\.merge/);
   assert.ok(mock.requests.some((call) => call.url.includes("/check-runs?")));
   assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge")));
 });
@@ -429,7 +529,7 @@ test("--merge-when-green preserves a branch that advanced after the confirmed me
   const originalFetch = mock.dependencies.fetchImpl;
   mock.dependencies.fetchImpl = (url, options) => url.includes("/git/ref/heads/")
     ? Response.json({ ref: "refs/heads/feat/bot-helper", object: { type: "commit", sha: "c".repeat(40) } }) : originalFetch(url, options);
-  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /The PR was merged; remote-branch cleanup may be incomplete/);
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /PR #7 was merged; remote-branch cleanup may be incomplete/);
   assert.ok(mock.requests.some((call) => call.url.endsWith("/merge")));
   assert.ok(!mock.requests.some((call) => call.url.includes("/git/refs/heads/")));
 });
@@ -571,7 +671,7 @@ test("the onboarding manifest is owner-only with explicit minimal permissions an
   assert.equal(manifest.public, false);
   assert.equal(manifest.request_oauth_on_install, false);
   assert.deepEqual(manifest.default_permissions, {
-    metadata: "read", contents: "write", issues: "write", pull_requests: "write",
+    metadata: "read", contents: "write", issues: "write", pull_requests: "write", checks: "read",
   });
   assert.deepEqual(manifest.default_events, []);
   assert.equal(manifest.hook_attributes.active, false);
@@ -653,6 +753,7 @@ test("help needs no environment or key and does not publish", async () => {
   assert.equal(await main(["--help"], { env: {}, stdout: { write: (text) => output.push(text) } }), 0);
   assert.match(output.join(""), /GITHUB_APP_PRIVATE_KEY_PATH/);
   assert.match(output.join(""), /--files/);
+  assert.match(output.join(""), /merger\.merge/);
 });
 
 test("missing environment and an empty index fail before key access or network calls", async () => {
