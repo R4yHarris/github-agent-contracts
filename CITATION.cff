@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this contract pack, please cite it using this metadata."
+type: software
+title: github-agent-contracts
+authors:
+  - name: R4yHarris
+url: "https://github.com/R4yHarris/github-agent-contracts"
+repository-code: "https://github.com/R4yHarris/github-agent-contracts"
+abstract: >-
+  github-agent-contracts gives Hermes, Claude Code, GitHub Copilot, OpenClaw, Cursor, and Codex a user-owned GitHub App bot identity and a default-deny permission policy, separate from the human GitHub user.
+keywords:
+  - GitHub App
+  - agent identity
+  - agent permissions
+  - commit trailers
+  - Hermes
+  - Claude Code
+  - GitHub Copilot
+  - OpenClaw
+  - Cursor
+  - Codex
+license: MIT

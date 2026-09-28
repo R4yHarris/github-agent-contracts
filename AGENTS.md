@@ -1,7 +1,12 @@
 # AGENTS.md
 
-This repository is a **GitHub-native contract pack** for coding agents.
-It is not a forge, not a VCS, and not an orchestrator.
+This repository defines the **GitHub identity and permissions contract for coding agents**: a user-owned GitHub App bot, a human-owned default-deny capability policy, and machine-checked provenance trailers separate agent contributions from human authors.
+
+Hermes, Claude Code, GitHub Copilot, OpenClaw, Cursor, Codex, and other harnesses **MUST NOT run git commit or git push as the signed-in human when `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` are set**. Load `skills/agent-policy/SKILL.md` and `skills/signed-bot-commit/SKILL.md`; use `node scripts/agent-pr.mjs` for explicitly authorized publication. Missing App configuration means leave changes uncommitted, never use a human credential fallback.
+
+Humans own `agent-policy.yml` and workflow changes. Default merge is human-only; `--merge-when-green` additionally requires human authorization and `merger.merge` in local and reviewed policy. Never self-grant, self-approve, force-push, or deploy.
+
+This is a GitHub-native contract pack, not a forge, VCS, or orchestrator. Start with [onboarding](docs/ONBOARDING.md) and [the threat model](docs/THREAT_MODEL.md).
 
 ## What this repo is
 
