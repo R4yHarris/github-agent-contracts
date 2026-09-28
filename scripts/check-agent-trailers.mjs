@@ -7,13 +7,16 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseAgentRun, parseTrailers } from "./parse-agent-run.mjs";
+
+export { parseTrailers } from "./parse-agent-run.mjs";
 
 const REQUIRED = ["AI-Agent", "AI-Model"];
 const BOT_EMAIL = /^[^@\s]+\[bot\]@(?:users\.)?noreply\.github\.com$/i;
 
 function usage(stream = process.stdout) {
   stream.write(`Usage:
-  check-agent-trailers.mjs [--require] [--json] [--author-email EMAIL]
+  check-agent-trailers.mjs [--require] [--require-run] [--json] [--author-email EMAIL]
     (--message TEXT | --message-file PATH)
   check-agent-trailers.mjs --help
 
@@ -21,6 +24,7 @@ function usage(stream = process.stdout) {
   --message-file PATH  Read a UTF-8 commit message from a file
   --author-email EMAIL Also classify GitHub noreply bot authors as agents
   --require            Require trailers on every message
+  --require-run        Require a valid AI-Run on agent-authored messages
   --json               Print the result as JSON
   --help, -h           Show this help
 
@@ -31,13 +35,15 @@ function usage(stream = process.stdout) {
 }
 
 function parseArgs(argv) {
-  const out = { require: false, json: false, message: null, authorEmail: "" };
+  const out = { require: false, requireRun: false, json: false, message: null, authorEmail: "" };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
       out.help = true;
     } else if (argument === "--require") {
       out.require = true;
+    } else if (argument === "--require-run") {
+      out.requireRun = true;
     } else if (argument === "--json") {
       out.json = true;
     } else if (["--message", "--message-file", "--author-email"].includes(argument)) {
@@ -60,36 +66,24 @@ function parseArgs(argv) {
   return out;
 }
 
-export function parseTrailers(message) {
-  const normalized = String(message).replace(/\r\n/g, "\n").trimEnd();
-  const trailers = {};
-  const lines = normalized.split("\n");
-  let i = lines.length - 1;
-  const collected = [];
-  while (i >= 0 && lines[i].trim() === "") i -= 1;
-  while (i >= 0) {
-    const line = lines[i];
-    const m = /^([A-Za-z0-9][-A-Za-z0-9]*):\s*(.*)$/.exec(line);
-    if (!m) break;
-    collected.push([m[1], m[2].trim()]);
-    i -= 1;
-  }
-  if (i < 0 || lines[i].trim() !== "") return trailers;
-  for (const [k, v] of collected.reverse()) trailers[k] = v;
-  return trailers;
-}
-
 export function isAgentAuthored(message, requireAll = false, authorEmail = "") {
   return requireAll || String(message).includes("AI-Agent:") || BOT_EMAIL.test(authorEmail);
 }
 
-export function checkMessage(message, requireAll = false, authorEmail = "") {
+export function checkMessage(message, requireAll = false, authorEmail = "", requireRun = false) {
   const trailers = parseTrailers(message);
   const agent = isAgentAuthored(message, requireAll, authorEmail);
   const missing = [];
   if (agent) {
     for (const key of REQUIRED) {
       if (!trailers[key] || String(trailers[key]).trim() === "") missing.push(key);
+    }
+    if (requireRun) {
+      try {
+        if (!parseAgentRun(trailers["AI-Run"], trailers["AI-Model"])) missing.push("AI-Run");
+      } catch {
+        missing.push("AI-Run");
+      }
     }
   }
   return {
@@ -117,11 +111,12 @@ function main(argv) {
     usage(process.stderr);
     process.exit(2);
   }
-  const result = checkMessage(args.message, args.require, args.authorEmail);
+  const result = checkMessage(args.message, args.require, args.authorEmail, args.requireRun);
   if (args.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else if (!result.ok) {
-    process.stderr.write(`missing trailers: ${result.missing.join(", ")}\n`);
+    const reason = result.missing.includes("AI-Run") ? "missing or invalid trailers" : "missing trailers";
+    process.stderr.write(`${reason}: ${result.missing.join(", ")}\n`);
   }
   process.exit(result.ok ? 0 : 1);
 }

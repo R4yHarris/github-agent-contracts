@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { checkMessage } from "./check-agent-trailers.mjs";
 import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy, requireCapability } from "./load-agent-policy.mjs";
+import { AgentRunError, packAgentRun, parseAgentRun } from "./parse-agent-run.mjs";
 
 class AgentPrError extends Error {}
 
@@ -128,16 +129,33 @@ function validateCommitInput(message, model = "unknown") {
   }
 }
 
-export function buildCommitMessage(message, model = "unknown", appSlug) {
+export function buildCommitMessage(message, model = "unknown", appSlug, agentRun = null) {
   validateCommitInput(message, model);
   if (typeof appSlug !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(appSlug)) {
     throw new AgentPrError("A verified App slug is required for the AI-Agent trailer.");
   }
-  return `${message.replace(/\r\n/g, "\n").trim()}\n\nAI-Agent: ${appSlug}\nAI-Model: ${model.trim()}\n`;
+  if (agentRun !== null && !parseAgentRun(agentRun, model.trim())) throw new AgentRunError("Invalid AI-Run value.");
+  const runTrailer = agentRun === null ? "" : `AI-Run: ${agentRun}\n`;
+  return `${message.replace(/\r\n/g, "\n").trim()}\n\nAI-Agent: ${appSlug}\nAI-Model: ${model.trim()}\n${runTrailer}`;
 }
 
-export function parseArgs(argv) {
-  const options = { model: "unknown", files: [] };
+export function upsertAgentRun(body, agentRun) {
+  if (body !== null && body !== undefined && typeof body !== "string") throw new AgentPrError("GitHub returned an invalid PR body.");
+  const text = body ?? "";
+  if (agentRun === null || agentRun === undefined) return text;
+  if (!parseAgentRun(agentRun) || /[`\r\n]/.test(agentRun)) throw new AgentRunError("Invalid AI-Run PR block.");
+  const block = `<!-- agent-run:1 -->\n\`${agentRun}\``;
+  let replaced = false;
+  const updated = text.replace(/^<!-- agent-run:1 -->[ \t]*(?:\r?\n[ \t]*`[^`\r\n]*`[ \t]*)?(?=\r?$)/gm, () => {
+    if (replaced) return "";
+    replaced = true;
+    return block;
+  });
+  return replaced ? updated : `${text.trimEnd()}${text.trimEnd() ? "\n\n" : ""}${block}`;
+}
+
+export function parseArgs(argv, env = {}) {
+  const options = { model: env.AI_MODEL || undefined, files: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") {
@@ -277,7 +295,10 @@ export async function publishAgentPr(options, {
   requireCapability(policy, "coder", "commit_branch");
   requireCapability(policy, "coder", "open_pr");
   if (options.mergeWhenGreen) requireCapability(policy, "merger", "merge");
-  validateCommitInput(options.message, options.model);
+  const suppliedModel = options.model ?? (env.AI_MODEL || undefined);
+  const model = suppliedModel ?? "unknown";
+  validateCommitInput(options.message, model);
+  const agentRun = packAgentRun(env, suppliedModel?.trim() ?? "");
   const appId = env.GITHUB_APP_ID;
   if (!appId || !/^[1-9][0-9]*$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY_PATH) {
     throw new AgentPrError("Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH in the environment; never paste the key into chat.");
@@ -382,7 +403,7 @@ export async function publishAgentPr(options, {
       throw new AgentPrError("GitHub did not return the bot identity for the configured App; refusing to publish.");
     }
     const botEmail = `${bot.id}+${botName}@users.noreply.github.com`;
-    const message = buildCommitMessage(options.message, options.model, appSlug);
+    const message = buildCommitMessage(options.message, model, appSlug, agentRun);
     const repository = await githubRequest(repoPath, token, { fetchImpl });
     if (
       repository?.full_name?.toLowerCase() !== slug.toLowerCase() ||
@@ -440,11 +461,12 @@ export async function publishAgentPr(options, {
     });
     committed = true;
     const actual = git(["log", "-1", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B"], "Committed identity verification").split("\0");
-    const checked = checkMessage(actual[5] ?? "", true);
+    const checked = checkMessage(actual[5] ?? "", true, "", agentRun !== null);
     if (
       !/^[0-9a-f]{40}$/i.test(actual[0]) || actual[1] !== botName || actual[2] !== botEmail ||
       actual[3] !== botName || actual[4] !== botEmail || !checked.ok ||
-      checked.trailers["AI-Agent"] !== appSlug || checked.trailers["AI-Model"] !== (options.model ?? "unknown").trim()
+      checked.trailers["AI-Agent"] !== appSlug || checked.trailers["AI-Model"] !== model.trim() ||
+      (checked.trailers["AI-Run"] ?? null) !== agentRun
     ) {
       throw new AgentPrError("The new commit does not have the required bot identity and trailers; refusing to push.");
     }
@@ -476,8 +498,20 @@ export async function publishAgentPr(options, {
       const title = /^\[[^\]]+\] /.test(subject) ? subject : `[agent] ${subject.replace(/^[a-z]+(?:\([^)]+\))?!?:\s*/i, "")}`;
       invoke("gh", [
         "pr", "create", "--repo", slug, "--head", branch, "--base", repository.default_branch,
-        "--draft", "--title", title, "--body", message,
+        "--draft", "--title", title, "--body", upsertAgentRun(buildCommitMessage(options.message, model, appSlug), agentRun),
       ], "Draft pull-request creation", { env: { ...baseEnv, GH_TOKEN: token } });
+    } else if (agentRun !== null) {
+      if (pullRequests.length !== 1 || !Number.isSafeInteger(pullRequests[0]?.number) || pullRequests[0].number <= 0) {
+        throw new AgentPrError("Expected exactly one open PR before updating AI-Run metadata.");
+      }
+      const pullPath = `${repoPath}/pulls/${pullRequests[0].number}`;
+      const pull = await githubRequest(pullPath, token, { fetchImpl });
+      if (pull?.number !== pullRequests[0].number || pull.state !== "open" || pull.head?.sha !== actual[0] ||
+          pull.head.ref !== branch || pull.head.repo?.full_name?.toLowerCase() !== slug.toLowerCase()) {
+        throw new AgentPrError("The PR no longer matches the published branch and head SHA; metadata was not updated.");
+      }
+      const body = upsertAgentRun(pull.body, agentRun);
+      if (body !== pull.body) await githubRequest(pullPath, token, { method: "PATCH", body: { body }, fetchImpl });
     }
     result = { commit: actual[0], botName, createdPullRequest: !pullRequests.length };
     if (options.mergeWhenGreen) {
@@ -537,7 +571,7 @@ export async function publishAgentPr(options, {
       result = { ...result, localBranchDeleted: true, checkedOutBranch: repository.default_branch };
     }
   } catch (error) {
-    const detail = error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "Publication failed; details were withheld to protect credentials.";
+    const detail = error instanceof AgentPrError || error instanceof AgentPolicyError || error instanceof AgentRunError ? error.message : "Publication failed; details were withheld to protect credentials.";
     const state = merged
       ? ` PR #${result.pullRequest} was merged; ${result.remoteBranchDeleted ? "the remote feature branch was removed, but local cleanup is incomplete." : "remote-branch cleanup may be incomplete."} Inspect the branch state before retrying.`
       : committed ? " The local commit remains; do not create a duplicate commit to retry." : "";
@@ -557,7 +591,7 @@ export async function publishAgentPr(options, {
 export async function main(argv, { stdout = process.stdout, stderr = process.stderr, ...dependencies } = {}) {
   let options;
   try {
-    options = parseArgs(argv);
+    options = parseArgs(argv, dependencies.env ?? process.env);
   } catch (error) {
     stderr.write(`${error instanceof AgentPrError ? error.message : "Invalid arguments."}\n`);
     return 2;
@@ -566,6 +600,10 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
     stdout.write(`Usage: node scripts/agent-pr.mjs --message TEXT [--model NAME] [--merge-when-green] [--files PATH ...]
 
 Without --files, commits the reviewed staged changes. --files must be last.
+--model overrides AI_MODEL; otherwise the required AI-Model defaults to unknown.
+Optional AI_* environment inputs add one AI-Run trailer and upsert one agent-run:1
+PR body pair. No metadata is invented; without run input, existing behavior is unchanged.
+See docs/METRICS.md. AI-Eval is never generated by this helper.
 Requires Node 20+, Git, gh, GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY_PATH.
 Requires root agent-policy.yml with coder commit_branch and open_pr grants,
 matching the reviewed policy on origin's default branch. No example fallback.
@@ -588,7 +626,7 @@ An invocation authorizes commit, push, and PR creation. Keep secrets out of argu
     if (result.merged) stdout.write(`Merged PR #${result.pullRequest} with a merge commit, removed its remote and local feature branches, and checked out ${result.checkedOutBranch}.\n`);
     return 0;
   } catch (error) {
-    stderr.write(`${error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);
+    stderr.write(`${error instanceof AgentPrError || error instanceof AgentPolicyError || error instanceof AgentRunError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);
     return 1;
   }
 }

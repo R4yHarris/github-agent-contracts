@@ -30,7 +30,7 @@ AI-Agent: <your-app-slug>
 AI-Model: unknown
 ```
 
-Use `--model` to replace `unknown` when the actual model is known. It checks the committed author, committer, trailers, and protected file paths before pushing the verified commit.
+Use `AI_MODEL` or `--model` to replace `unknown` when the actual model is known; the flag takes precedence. Harnesses SHOULD supply known `AI_*` run values from [METRICS.md](../../docs/METRICS.md) before invoking the helper. It adds one optional `AI-Run` trailer and upserts the tagged PR pair, omitting run metadata when no environment input is supplied. Never invent missing counts or identifiers. Humans evaluate with separate `AI-Eval` comments; the helper must not generate them. It checks the committed author, committer, trailers, and protected file paths before pushing the verified commit.
 
 ## Usage
 

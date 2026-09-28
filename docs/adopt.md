@@ -23,11 +23,12 @@ Use this option when the consumer cannot reference the public Action or needs to
 .github/actions/check-agent-trailers/action.yml
 scripts/check-agent-trailers.mjs
 scripts/check-pr-agent-trailers.mjs
+scripts/parse-agent-run.mjs
 ```
 
-The source files are the [composite Action](../.github/actions/check-agent-trailers/action.yml), [message checker](../scripts/check-agent-trailers.mjs), and [PR runner](../scripts/check-pr-agent-trailers.mjs). Retain the pack's [MIT notice](../LICENSE) with the vendored files without replacing the consumer's own license.
+The source files are the [composite Action](../.github/actions/check-agent-trailers/action.yml), [message checker](../scripts/check-agent-trailers.mjs), [PR runner](../scripts/check-pr-agent-trailers.mjs), and [shared parser](../scripts/parse-agent-run.mjs). Retain the pack's [MIT notice](../LICENSE) with the vendored files without replacing the consumer's own license.
 
-**Copying only the Action metadata is not sufficient.** Its command expects both scripts at the relative paths above. Copying instruction files or a workflow does not make a local `uses: ./.github/actions/check-agent-trailers` reference point back to this pack.
+**Copying only the Action metadata is not sufficient.** Its command needs both checker scripts and their shared parser at the relative paths above. Copying instruction files or a workflow does not make a local `uses: ./.github/actions/check-agent-trailers` reference point back to this pack.
 
 For this option, copy the pack's [local workflow](../.github/workflows/check-agent-trailers.yml), not the remotely pinned consumer example. The local workflow fetches full PR history, checks out the trusted base revision, and then runs:
 
@@ -39,7 +40,7 @@ For this option, copy the pack's [local workflow](../.github/workflows/check-age
     head-sha: ${{ github.event.pull_request.head.sha }}
 ```
 
-Land the Action and both scripts on the target branch in a reviewed bootstrap change **before enabling the local workflow**. Otherwise its first run cannot find the checker at the base revision. Keep the trusted-base checkout step when adopting the local workflow; checker updates take effect after they reach that branch.
+Land the Action, both checker scripts, and the shared parser on the target branch in a reviewed bootstrap change **before enabling the local workflow**. Otherwise its first run cannot find the checker at the base revision. Keep the trusted-base checkout step when adopting the local workflow; checker updates take effect after they reach that branch.
 
 For local validation and future updates, also copy the [message-checker tests](../tests/check-agent-trailers.test.mjs) and [PR-runner tests](../tests/check-pr-agent-trailers.test.mjs) into `tests/`. With Node 20+ and Git available, run from the consumer root:
 
@@ -49,6 +50,8 @@ node --test tests/*.test.mjs
 ```
 
 Update the Action, scripts, and tests together from a reviewed revision. Neither adoption option needs `npm install`.
+
+Optional v0.2.0 run metadata is described in [METRICS.md](METRICS.md). Copy [export-agent-metrics.mjs](../scripts/export-agent-metrics.mjs) for local JSONL export if needed. The shared parser remains required by the checker even when run metadata is not enabled; the default trailer policy is unchanged.
 
 ## Choose the policy
 
