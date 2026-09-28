@@ -82,38 +82,38 @@ Unsupported YAML is rejected rather than interpreted permissively. Use the suppl
 
 ## Publisher enforcement
 
-[agent-pr.mjs](../scripts/agent-pr.mjs) is fixed to the **coder** role. It requires both `commit_branch` and `open_pr` before key access or Git commands, even when an existing PR might be reused. With `--merge-when-green`, it also requires coder `merge` at that point and in the reviewed default-branch policy. It has no `--role` or `--policy` override.
+[agent-pr.mjs](../scripts/agent-pr.mjs) requires coder `commit_branch` and `open_pr` before key access or Git commands, even when an existing PR might be reused. With `--merge-when-green`, it also requires `merger.merge` in the local and reviewed default-branch policy; coder `merge` alone is insufficient. It has no `--role` or `--policy` override. The role check does not identify or switch the App credential: the helper still uses the supplied `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH`.
 
-After App authentication, it reads root policy from origin's default branch and requires its grants to match the local policy. It refuses staged or specified root-policy changes, checks the new commit for policy edits, and verifies the policy in the committed tree before pushing. A feature-branch or working-copy self-grant cannot replace the default branch's policy. API or validation failures stop publication, with no human-token fallback.
+Before token minting, it refuses staged or specified root-policy changes and staged or selected `.github/workflows/**` paths; workflow changes require human publication and the coder App needs no Workflows permission. After App authentication, it reads root policy from origin's default branch and requires its grants to match the local policy. It checks the new commit for policy edits and verifies the policy in the committed tree before pushing. A feature-branch or working-copy self-grant cannot replace the default branch's policy. API or validation failures stop publication, with no human-token fallback.
 
 The helper checks both branch protection and active rules before committing and again before pushing. Any applicable rule is treated conservatively as protection. Failure to determine protection state denies publication, even if it is only an availability or permission problem.
 
-The coder helper has **no protected-push or deployment implementation**. Bare `--merge`, `--push-protected`, and `--deploy` are rejected. A protected push first requires `push_protected`, then remains unsupported by this helper even with a grant. The only merge implementation is the explicitly opted-in, policy-gated flow below. There is no separate merger or deploy script; keep those roles' allow-lists empty by default.
+The helper has **no protected-push or deployment implementation**. Bare `--merge`, `--push-protected`, and `--deploy` are rejected. A protected push first requires `push_protected`, then remains unsupported by this helper even with a grant. The only merge implementation is the explicitly opted-in, policy-gated flow below. There is no separate merger or deploy script; keep those roles' allow-lists empty by default.
 
 ## Opt-in merge
 
-**Humans must set merge to allow in root `agent-policy.yml` before `--merge-when-green` works.** Version 1 expresses this by adding `merge` to `roles.coder.allow`, not by adding a literal `merge: allow` field, which the strict parser rejects. For example, a human may review and publish this policy:
+**Humans must set merge to allow in root `agent-policy.yml` before `--merge-when-green` works.** Version 1 expresses this by adding `merge` to `roles.merger.allow`, not by adding a literal `merge: allow` field, which the strict parser rejects. For example, a human may review and publish this policy:
 
 ```yaml
 version: 1
 default: deny
 roles:
   coder:
-    allow: [commit_branch, open_pr, comment, label, merge]
+    allow: [commit_branch, open_pr, comment, label]
   merger:
-    allow: []
+    allow: [merge]
   deploy:
     allow: []
 ```
 
-This is an explicit expansion of the coder role, not the default example. A grant under `merger.allow` alone does not authorize the fixed coder publisher. Agents must not edit, stage, or commit the active policy to enable this flag. The local, committed, and reviewed default-branch policy must agree; the helper rechecks local and reviewed policy while waiting and immediately before merging.
+This is a human-reviewed opt-in, not the default example. Coder `merge` alone does not authorize the flag. Agents must not edit, stage, or commit the active policy to enable it. The local, committed, and reviewed default-branch policy must agree; the helper rechecks local and reviewed policy while waiting and immediately before merging. A policy role is not an App identity check. The trusted launcher/operator must keep `--merge-when-green` disabled on coder-only WSL and use a separately approved merger App/context; the helper does not provision or switch keys.
 
-The human must also approve **Checks: read-only** for the configured App installation. The flag requests `checks: read` on its repository-scoped token in addition to the normal contents/pull requests write permissions. Normal publishing does not request this extra permission, and the default App manifest is unchanged. The repository must permit merge commits and permit this App's PR merge without any rule bypass; required human reviews still apply.
+The human must also accept **Checks: read-only** on the configured App installation. The manifest includes it, but normal publishing requests only contents/pull requests write on its repository-scoped token; the flag additionally requests `checks: read`. The repository must permit merge commits and permit the configured App's PR merge without any rule bypass; required human reviews still apply.
 
 After explicit human authorization for publication, merge, and remote-branch cleanup:
 
 ```bash
-node scripts/load-agent-policy.mjs --role coder --capability merge
+node scripts/load-agent-policy.mjs --role merger --capability merge
 node scripts/agent-pr.mjs --message "fix: validate input" --merge-when-green --files README.md
 ```
 
@@ -125,9 +125,9 @@ When the check is green, the helper may mark a draft PR ready, then rereads its 
 
 Once eligible, it sends a SHA-guarded merge request with `merge_method: merge`, preserving provenance trailers in the merge commit message. It never squashes, rebase-merges, force-pushes, or pushes main directly. GitHub must still accept the merge under the repository's rules.
 
-Only after GitHub confirms the merge does it delete the remote feature branch. It checks that the branch is still unprotected and still points to the published SHA before deletion; an already-deleted branch is treated as cleaned up. It never deletes the local branch. If a branch has advanced or cleanup fails, report the partial result rather than deleting new work or claiming full success. The reference check and deletion are separate API requests, so avoid concurrent writes to a branch being cleaned up.
+Only after GitHub confirms the merge does it delete the remote feature branch. It checks that the branch is still unprotected and still points to the published SHA before deletion; an already-deleted branch is treated as cleaned up. After confirmed merge it fetches origin with App auth, checks out the default branch, fast-forwards it, and deletes the local feature ref only if the worktree is clean and the ref still points to the published head included in the merge, not the generated merge commit. Dirty state, missing or conflicting work, or branch movement aborts local cleanup without discarding work. Never reset, clean, force-delete, or delete unrelated branches. Report a partial result rather than claiming full success. The remote reference check and deletion are separate API requests, so avoid concurrent writes to a branch being cleaned up.
 
-On failure, the published commit and PR can remain, and a timed-out flow may have marked a draft ready. Inspect the PR and remote branch before retrying; do not create a duplicate commit just to retry a merge. Human-only merge remains the default, and deploys and direct protected pushes stay disabled. Prefer the separate-role model in [ROLES.md](ROLES.md) wherever granting coder merge authority is not acceptable.
+On failure, the published commit and PR can remain, and a timed-out flow may have marked a draft ready. Inspect the PR and both remote and local branches before retrying; do not create a duplicate commit just to retry a merge. Human-only merge remains the default, and deploys and direct protected pushes stay disabled. See [ROLES.md](ROLES.md) for credential separation.
 
 ## Limits
 

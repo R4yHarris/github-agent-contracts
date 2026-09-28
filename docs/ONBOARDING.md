@@ -8,7 +8,7 @@ Browser entry point: **[Register App from manifest](app-manifest.json)**. Use a 
 
 This link is a **static template, not a working registration service**. Replace its placeholder callback with an operator-controlled receiver before submitting it through [GitHub's manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). Callback hosting is a follow-on, not part of this change. Until your receiver exists, use GitHub's manual App registration form with the same settings; do not submit secrets or a conversion code to this project's maintainer.
 
-The manifest sets `public: false`, disables webhooks and user OAuth, and requests only metadata read plus contents, issues, and pull requests write. Omit issues write if you do not need comment or label outputs. It requests no administration, secrets, workflows, or organization-member permissions. GitHub has **no manifest field to default repository selection**; selecting repositories during installation is a required human step, not something the JSON enforces.
+The manifest sets `public: false`, disables webhooks and user OAuth, and requests repository permissions **Metadata: read**, **Checks: read-only**, and **Contents, Issues, Pull requests: read-write**. Omit Issues write if you do not need comment or label outputs. It requests no Administration, Secrets, Workflows, Actions, or Deployments permissions. GitHub has **no manifest field to default repository selection**; selecting repositories during installation is a required human step, not something the JSON enforces. Existing App installations must have the Checks permission change accepted by a human before opt-in merge can use it.
 
 Do not install `r4yharris-agent-coder` on private or production repositories. A maintainer demo App is optional for public playgrounds only; see [the threat model](THREAT_MODEL.md).
 
@@ -44,7 +44,7 @@ Use Node 20+, Git, and `gh` for publication. Adapt the workspace name and test c
 
 A human must review [the policy example](../examples/agent-policy.yml), install it as root `agent-policy.yml`, and publish it on the default branch through the existing human review process. Include that reviewed version in the feature branch too. Keep merger and deploy allow-lists empty. The publisher requires coder `commit_branch` and `open_pr`, checks the default-branch policy, and refuses root-policy edits; there is no example fallback. See [POLICY.md](POLICY.md) and [ROLES.md](ROLES.md). Copy their guidance with the skills when adopting the pack.
 
-For the local Action, land the Action and both checker scripts on the target branch before enabling the workflow, because it executes the base revision's trusted checker. A human bootstraps workflow changes: the App intentionally has no workflows-write permission. Keep human review on changes to the workflow, instructions, and publisher.
+For the local Action, land the Action and both checker scripts on the target branch before enabling the workflow, because it executes the base revision's trusted checker. A human bootstraps and publishes `.github/workflows/**` changes: the helper refuses staged or selected workflow paths before token minting, and the coder App intentionally has no Workflows permission. Keep human review on changes to the workflow, instructions, and publisher.
 
 ## 3. Protect the branch and publish
 
@@ -52,13 +52,13 @@ After a successful trial PR run, configure branch protection or a ruleset for `m
 
 - Require a PR, human approval, and the **`check-agent-trailers`** check from GitHub Actions. Both supplied workflows give the job this exact name. Update existing required-check rules if adopting from an older job name.
 - Disallow direct pushes, force pushes, and branch deletion. Do not give the App a bypass. Limit protected-branch updates and merges to authorized humans, using the restrictions available for your account and plan.
-- Never permit agent merge or auto-merge tooling. Pull requests write permission is not inherently draft-only or merge-proof; branch rules and the human merge gate are required.
+- Leave agent merging disabled by default. Pull requests write permission is not inherently draft-only or merge-proof; branch rules and the human merge gate are required even for an explicitly authorized opt-in merge.
 
 Tell the agent:
 
-> Load agent-policy first, then use signed-bot-commit / scripts/agent-pr.mjs for all publish. Never grant yourself policy rights, publish as the signed-in human, print tokens, merge, or deploy. Stop if policy or App authentication is unavailable.
+> Load agent-policy first, then use signed-bot-commit / scripts/agent-pr.mjs for authorized publication after tests and reviewed staging. Never grant yourself policy rights, publish as the signed-in human, or print tokens. Do not merge without separate authorization and a human-published merger.merge grant. Stop after tests with uncommitted changes if policy or App configuration is unavailable.
 
-Authorize a specific feature-branch publication, then let the agent use the helper. Check the bot author/committer and trailers on the resulting commits. The helper creates a draft PR or reuses an existing open PR. **Humans review and merge.** Local commits do not independently authorize a push.
+Authorize a specific feature-branch publication, then let the agent use the helper as its final implementation step after tests, policy checks, and reviewed staging. Check the bot author/committer and trailers on the resulting commits. The helper creates a draft PR or reuses an existing open PR. **Humans review and merge by default**; opt-in merge requires separate authorization, reviewed `roles.merger.allow: [merge]`, an approved merger App/context, and all GitHub checks and reviews. A coder-only WSL launcher must keep the merge flag disabled. Local commits do not independently authorize a push. See [POLICY.md](POLICY.md) and [ORCHESTRATION-MACHINE.md](ORCHESTRATION-MACHINE.md).
 
 The current helper makes unsigned Git commits; its JWT signature authenticates the App, not the commit. See [THREAT_MODEL.md](THREAT_MODEL.md) for checker limits and repositories that require signed commits.
 

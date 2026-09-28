@@ -8,13 +8,13 @@ This is community OSS for GitHub, not a GitHub replacement.
 
 1. **[Register App from manifest](docs/app-manifest.json).** Create an App owned by you or your organization, keep it private to that account, and choose **Only select repositories** during installation.
 2. **Configure and copy.** Supply `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` outside git, then copy AGENTS.md, the policy and commit skills, publisher/loader, and check Action/workflow as listed in [ONBOARDING.md](docs/ONBOARDING.md). A human installs the root capability policy. CI stores the key in the `GITHUB_APP_PRIVATE_KEY` secret.
-3. **Protect and publish.** Require `check-agent-trailers`, disallow direct pushes to `main` and agent bypass, and reserve merges for humans. Tell the agent: "Use signed-bot-commit / scripts/agent-pr.mjs for all publish."
+3. **Protect and publish.** Require `check-agent-trailers`, disallow direct pushes to `main` and agent bypass, and leave merging to humans by default. After tests, policy gates, and reviewed staging, authorized agent publication ends with `node scripts/agent-pr.mjs --message "..."`; without App configuration, stop with uncommitted changes, never a human-token fallback.
 
 The manifest is a static template, not a hosted registration button. An owner-controlled manifest callback is a follow-on; placeholder URLs must be replaced before completing GitHub's flow. The [onboarding guide](docs/ONBOARDING.md) describes that boundary and the manual registration fallback.
 
 ### Create your own App (recommended)
 
-Your account or organization owns the App and controls its private key. No project-maintainer installation is needed. Use the [manifest](docs/app-manifest.json), [harness guide](docs/HARNESSES.md), and [threat model](docs/THREAT_MODEL.md). The App key holder can mint tokens for **every installation of that App**, so installation scope and key custody matter.
+Your account or organization owns the App and controls its private key. No project-maintainer installation is needed. Use the [manifest](docs/app-manifest.json), [harness guide](docs/HARNESSES.md), [dedicated machine guide](docs/ORCHESTRATION-MACHINE.md), and [threat model](docs/THREAT_MODEL.md). The App key holder can mint tokens for **every installation of that App**, so installation scope and key custody matter. The manifest includes Checks read-only; humans must accept this permission on existing installations for opt-in merge.
 
 ### Demo App
 
@@ -58,7 +58,7 @@ Follow the [adoption guide](docs/adopt.md) and copy the [consumer workflow](exam
 
 Hermes, Copilot, Claude Code, and Cursor share one human-owned root `agent-policy.yml`. The [example](examples/agent-policy.yml) allows coder branch commits, draft PRs, comments, and labels; merger and deploy allow-lists are empty. Missing policy denies publication, and agents must not edit policy to grant themselves rights.
 
-Read [POLICY.md](docs/POLICY.md) for the three permission layers, human bootstrap, and optional `--merge-when-green` flow, and [ROLES.md](docs/ROLES.md) for role-key separation. Merging remains disabled unless a human grants coder `merge` and authorizes the flag; it requires a successful exact-head trailer check and creates a merge commit before remote-branch cleanup. Protected pushes and deploys remain unsupported. No active policy grant or hosted control plane is installed by this pack.
+Read [POLICY.md](docs/POLICY.md) for the three permission layers, human bootstrap, and optional `--merge-when-green` flow, and [ROLES.md](docs/ROLES.md) for role-key separation. Merging remains disabled unless a human publishes `roles.merger.allow: [merge]` and explicitly authorizes the flag; coder `merge` alone is insufficient. The flag requires a successful exact-head trailer check and all GitHub reviews, creates a merge commit, and cleans up only unchanged remote and local feature refs after confirmation. Policy does not select the App key; a coder-only WSL host must disable merge and a trusted launcher/operator must use a separately approved merger App/context. Protected pushes and deploys remain unsupported. No active policy grant or hosted control plane is installed by this pack.
 
 ## Non-goals
 

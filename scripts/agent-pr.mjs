@@ -157,7 +157,7 @@ export function parseArgs(argv) {
       }
       options[argument === "--model" ? "model" : "message"] = value;
     } else if (["--merge", "--push-protected", "--push_protected", "--deploy"].includes(argument)) {
-      throw new AgentPrError("Use --merge-when-green only with an approved coder merge grant. Protected pushes and deploys are unsupported.");
+      throw new AgentPrError("Use --merge-when-green only with an approved merger merge grant. Protected pushes and deploys are unsupported.");
     } else {
       throw new AgentPrError("Unknown argument; use --help for usage.");
     }
@@ -276,7 +276,7 @@ export async function publishAgentPr(options, {
   const policy = loadPolicy({ cwd });
   requireCapability(policy, "coder", "commit_branch");
   requireCapability(policy, "coder", "open_pr");
-  if (options.mergeWhenGreen) requireCapability(policy, "coder", "merge");
+  if (options.mergeWhenGreen) requireCapability(policy, "merger", "merge");
   validateCommitInput(options.message, options.model);
   const appId = env.GITHUB_APP_ID;
   if (!appId || !/^[1-9][0-9]*$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY_PATH) {
@@ -321,9 +321,12 @@ export async function publishAgentPr(options, {
   }
   invoke("gh", ["--version"], "GitHub CLI availability check");
   const readStaged = () => git(["diff", "--cached", "--name-only", "--no-renames", "-z"], "Staged-file lookup").split("\0").filter(Boolean);
-  const rejectPolicyChanges = (changes) => {
+  const rejectHumanOwnedChanges = (changes) => {
     if (changes.some((file) => file.toLowerCase() === "agent-policy.yml")) {
       throw new AgentPrError("Agents cannot publish changes to root agent-policy.yml; a human must review and publish policy changes.");
+    }
+    if (changes.some((file) => file.replaceAll("\\", "/").toLowerCase().startsWith(".github/workflows/"))) {
+      throw new AgentPrError("A human must publish changes under .github/workflows/; the coder App does not request Workflows permission.");
     }
   };
   const checkIndex = () => {
@@ -331,7 +334,7 @@ export async function publishAgentPr(options, {
     for (const file of indexed) safeFile(file, cwd, privateKeyPath);
   };
   const files = [...new Set((options.files ?? []).map((file) => safeFile(file, cwd, privateKeyPath)))];
-  rejectPolicyChanges(files);
+  rejectHumanOwnedChanges(files);
   for (const file of files) {
     try {
       if (lstatSync(resolve(cwd, file)).isDirectory()) {
@@ -344,7 +347,7 @@ export async function publishAgentPr(options, {
     }
   }
   const staged = readStaged();
-  rejectPolicyChanges(staged);
+  rejectHumanOwnedChanges(staged);
   checkIndex();
   for (const file of staged) safeFile(file, cwd, privateKeyPath);
   if (files.length && staged.some((file) => !files.includes(file))) {
@@ -391,7 +394,7 @@ export async function publishAgentPr(options, {
     const approvedPolicy = await readReviewedPolicy(repoPath, repository.default_branch, token, fetchImpl);
     requireCapability(approvedPolicy, "coder", "commit_branch");
     requireCapability(approvedPolicy, "coder", "open_pr");
-    if (options.mergeWhenGreen) requireCapability(approvedPolicy, "coder", "merge");
+    if (options.mergeWhenGreen) requireCapability(approvedPolicy, "merger", "merge");
     const verifyApprovedPolicy = (candidate) => {
       for (const role of Object.keys(approvedPolicy.roles)) {
         const approved = approvedPolicy.roles[role].allow;
@@ -419,7 +422,7 @@ export async function publishAgentPr(options, {
       git(["add", "--", ...files], "Staging selected files", { env: { ...baseEnv, GIT_LITERAL_PATHSPECS: "1" } });
     }
     const selected = readStaged();
-    rejectPolicyChanges(selected);
+    rejectHumanOwnedChanges(selected);
     checkIndex();
     for (const file of selected) safeFile(file, cwd, privateKeyPath);
     if (!selected.length || (files.length && selected.some((file) => !files.includes(file)))) {
@@ -447,25 +450,24 @@ export async function publishAgentPr(options, {
     }
     const committedFiles = git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], "Committed file verification").split("\0").filter(Boolean);
     for (const file of committedFiles) safeFile(file, cwd, privateKeyPath);
-    rejectPolicyChanges(git(["diff-tree", "--root", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", actual[0]], "Committed policy-change verification").split("\0").filter(Boolean));
+    rejectHumanOwnedChanges(git(["diff-tree", "--root", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", actual[0]], "Committed human-owned file verification").split("\0").filter(Boolean));
     verifyApprovedPolicy(parseAgentPolicy(git(["show", `${actual[0]}:agent-policy.yml`], "Committed policy verification")));
     await checkProtectedBranch();
     checkBranch();
     const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
-    git(["push", "--no-follow-tags", pushUrl, `${actual[0]}:refs/heads/${branch}`], "Branch push", {
-      env: {
-        ...baseEnv,
-        GIT_CONFIG_COUNT: "8",
-        GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
-        GIT_CONFIG_KEY_1: "core.askPass", GIT_CONFIG_VALUE_1: "",
-        GIT_CONFIG_KEY_2: "http.extraHeader", GIT_CONFIG_VALUE_2: "",
-        GIT_CONFIG_KEY_3: `http.${pushUrl}.extraHeader`, GIT_CONFIG_VALUE_3: "",
-        GIT_CONFIG_KEY_4: `http.${pushUrl}.extraHeader`, GIT_CONFIG_VALUE_4: header,
-        GIT_CONFIG_KEY_5: "http.followRedirects", GIT_CONFIG_VALUE_5: "false",
-        GIT_CONFIG_KEY_6: "protocol.allow", GIT_CONFIG_VALUE_6: "never",
-        GIT_CONFIG_KEY_7: "protocol.https.allow", GIT_CONFIG_VALUE_7: "always",
-      },
-    });
+    const authenticatedEnv = {
+      ...baseEnv,
+      GIT_CONFIG_COUNT: "8",
+      GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "core.askPass", GIT_CONFIG_VALUE_1: "",
+      GIT_CONFIG_KEY_2: "http.extraHeader", GIT_CONFIG_VALUE_2: "",
+      GIT_CONFIG_KEY_3: `http.${pushUrl}.extraHeader`, GIT_CONFIG_VALUE_3: "",
+      GIT_CONFIG_KEY_4: `http.${pushUrl}.extraHeader`, GIT_CONFIG_VALUE_4: header,
+      GIT_CONFIG_KEY_5: "http.followRedirects", GIT_CONFIG_VALUE_5: "false",
+      GIT_CONFIG_KEY_6: "protocol.allow", GIT_CONFIG_VALUE_6: "never",
+      GIT_CONFIG_KEY_7: "protocol.https.allow", GIT_CONFIG_VALUE_7: "always",
+    };
+    git(["push", "--no-follow-tags", pushUrl, `${actual[0]}:refs/heads/${branch}`], "Branch push", { env: authenticatedEnv });
     const pullRequestPath = `${repoPath}/pulls?state=open&head=${encodeURIComponent(`${origin.owner}:${branch}`)}`;
     const pullRequests = await githubRequest(pullRequestPath, token, { fetchImpl });
     if (!Array.isArray(pullRequests)) throw new AgentPrError("GitHub returned an invalid pull-request list.");
@@ -486,10 +488,10 @@ export async function publishAgentPr(options, {
       const pullNumber = candidates[0].number;
       const checkMergePolicy = async () => {
         const currentPolicy = loadPolicy({ cwd });
-        requireCapability(currentPolicy, "coder", "merge");
+        requireCapability(currentPolicy, "merger", "merge");
         verifyApprovedPolicy(currentPolicy);
         const currentReviewedPolicy = await readReviewedPolicy(repoPath, repository.default_branch, token, fetchImpl);
-        requireCapability(currentReviewedPolicy, "coder", "merge");
+        requireCapability(currentReviewedPolicy, "merger", "merge");
         verifyApprovedPolicy(currentReviewedPolicy);
       };
       await waitForGreenPullRequest({
@@ -504,6 +506,7 @@ export async function publishAgentPr(options, {
         throw new AgentPrError("GitHub did not confirm a successful merge; the feature branch was not deleted.");
       }
       merged = true;
+      result = { ...result, merged: true, pullRequest: pullNumber, mergeCommit: mergeResult.sha, remoteBranchDeleted: false };
       await checkProtectedBranch();
       const reference = await githubRequest(`${repoPath}/git/ref/heads/${encodeURIComponent(branch)}`, token, { fetchImpl, allowMissing: true });
       if (reference !== undefined) {
@@ -512,11 +515,32 @@ export async function publishAgentPr(options, {
         }
         await githubRequest(`${repoPath}/git/refs/heads/${encodeURIComponent(branch)}`, token, { method: "DELETE", fetchImpl });
       }
-      result = { ...result, merged: true, pullRequest: pullNumber, mergeCommit: mergeResult.sha, remoteBranchDeleted: true };
+      result = { ...result, remoteBranchDeleted: true };
+      const checkLocalCleanup = (expectedBranch) => {
+        if (git(["symbolic-ref", "--quiet", "--short", "HEAD"], "Local branch verification").trim() !== expectedBranch ||
+            git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], "Feature branch verification").trim() !== actual[0]) {
+          throw new AgentPrError("The local branch or published feature SHA changed; local cleanup was stopped.");
+        }
+        if (git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], "Worktree cleanliness verification")) {
+          throw new AgentPrError("The worktree has staged, unstaged, or untracked changes; local cleanup was stopped.");
+        }
+      };
+      checkLocalCleanup(branch);
+      git(["fetch", "--no-tags", pushUrl, `refs/heads/${repository.default_branch}:refs/remotes/origin/${repository.default_branch}`], "Default branch fetch", { env: authenticatedEnv });
+      checkLocalCleanup(branch);
+      git(["switch", "--", repository.default_branch], "Default branch checkout");
+      checkLocalCleanup(repository.default_branch);
+      git(["merge", "--ff-only", `refs/remotes/origin/${repository.default_branch}`], "Default branch fast-forward");
+      checkLocalCleanup(repository.default_branch);
+      git(["merge-base", "--is-ancestor", actual[0], "HEAD"], "Merged feature ancestry verification");
+      git(["update-ref", "-d", `refs/heads/${branch}`, actual[0]], "Local feature branch deletion");
+      result = { ...result, localBranchDeleted: true, checkedOutBranch: repository.default_branch };
     }
   } catch (error) {
     const detail = error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "Publication failed; details were withheld to protect credentials.";
-    const state = merged ? " The PR was merged; remote-branch cleanup may be incomplete. Inspect it before retrying." : committed ? " The local commit remains; do not create a duplicate commit to retry." : "";
+    const state = merged
+      ? ` PR #${result.pullRequest} was merged; ${result.remoteBranchDeleted ? "the remote feature branch was removed, but local cleanup is incomplete." : "remote-branch cleanup may be incomplete."} Inspect the branch state before retrying.`
+      : committed ? " The local commit remains; do not create a duplicate commit to retry." : "";
     failure = new AgentPrError(`${detail}${state}`);
   } finally {
     try {
@@ -547,9 +571,11 @@ Requires root agent-policy.yml with coder commit_branch and open_pr grants,
 matching the reviewed policy on origin's default branch. No example fallback.
 Discovers your configured App's bot identity, pushes the current feature branch to origin,
 and creates a draft PR only when no open PR exists. Never force-pushes or pushes main.
---merge-when-green additionally requires coder.merge in local and reviewed policy,
+--merge-when-green additionally requires merger.merge in local and reviewed policy,
 plus App Checks read permission. Waits for a successful check-agent-trailers on the
 exact head SHA, marks drafts ready, merges with a merge commit, then deletes that branch.
+After remote deletion it fetches origin with the App token, fast-forwards the local
+default branch, and deletes the unchanged local feature branch only if clean.
 No self-approval, squash, role/policy override, protected push, deploy, or auto-merge mode.
 An invocation authorizes commit, push, and PR creation. Keep secrets out of arguments.
 `);
@@ -559,7 +585,7 @@ An invocation authorizes commit, push, and PR creation. Keep secrets out of argu
     const result = await publishAgentPr(options, dependencies);
     stdout.write(`Committed ${result.commit.slice(0, 7)} as ${result.botName} and pushed to origin.\n`);
     stdout.write(result.createdPullRequest ? "Created a draft pull request.\n" : "Updated the branch for its existing pull request.\n");
-    if (result.merged) stdout.write(`Merged PR #${result.pullRequest} with a merge commit and removed its remote feature branch.\n`);
+    if (result.merged) stdout.write(`Merged PR #${result.pullRequest} with a merge commit, removed its remote and local feature branches, and checked out ${result.checkedOutBranch}.\n`);
     return 0;
   } catch (error) {
     stderr.write(`${error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);

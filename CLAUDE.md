@@ -1,3 +1,3 @@
 # Repository instructions
 
-Follow [AGENTS.md](AGENTS.md) for all repository rules and required skills.
+Follow [AGENTS.md](AGENTS.md) for all repository rules and required skills. After tests, policy gates, and reviewed staging, use `node scripts/agent-pr.mjs --message "..."` as the final step only for explicitly authorized publication with App configuration present. Otherwise leave changes uncommitted; never use human credentials or edit the active policy. Merge requires separate authorization and `merger.merge`, not merely a coder key.

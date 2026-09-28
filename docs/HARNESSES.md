@@ -2,7 +2,7 @@
 
 The common contract is [AGENTS.md](../AGENTS.md), which requires [agent-policy](../skills/agent-policy/SKILL.md) first, then [signed-bot-commit](../skills/signed-bot-commit/SKILL.md) and [scripts/agent-pr.mjs](../scripts/agent-pr.mjs) for authorized publication. Use the consuming user's or organization's App from [ONBOARDING.md](ONBOARDING.md), never a shared maintainer App for private repositories.
 
-Harness setup does not replace the required `check-agent-trailers` check, branch protection, bot authorship, or trailers. No harness may publish as the signed-in human, print credentials, or merge an agent PR. App environment variables do not themselves authorize publication.
+Harness setup does not replace the required `check-agent-trailers` check, branch protection, bot authorship, or trailers. No harness may publish as the signed-in human or print credentials. Human-only merge is the default; opt-in merge needs explicit authorization, `merger.merge` in local and reviewed policy, and a separately approved merger App/context. App environment variables do not themselves authorize publication.
 
 Every harness reads the same human-owned root `agent-policy.yml` through [the loader](../scripts/load-agent-policy.mjs), not a harness-specific allow-list or cached fallback. Missing policy denies writes. No harness may edit policy to grant itself rights, change its assigned role, or deploy by default. [POLICY.md](POLICY.md) defines the shared capabilities; [ROLES.md](ROLES.md) defines operator-controlled role and key boundaries.
 
@@ -20,7 +20,7 @@ Keep [CLAUDE.md](../CLAUDE.md) as a short pointer to AGENTS.md. Claude Code read
 
 Load AGENTS.md as repository instructions, the agent-policy skill before writes, and [skills/signed-bot-commit/SKILL.md](../skills/signed-bot-commit/SKILL.md) for publication using the installed runtime's supported mechanism. For GitHub issue, PR, or code reads, also follow the [GitHub MCP allowlist skill](../skills/github-mcp-allowlist/SKILL.md). Safe-output handlers must enforce the shared policy in addition to their tool allowlists.
 
-Use repository-scoped installation tokens supplied by a trusted launcher; never store tokens in repository MCP configuration. Keep default agent tools read-only and write-capable credentials in the approved publication context. No Hermes runtime changes are needed.
+Use repository-scoped installation tokens supplied by a trusted launcher; never store tokens in repository MCP configuration. Keep default agent tools read-only and write-capable credentials in the approved publication context. For a dedicated WSL/Hermes machine, follow [ORCHESTRATION-MACHINE.md](ORCHESTRATION-MACHINE.md): no human `gh` sign-in or forwarded SSH credentials, only the coder key, and no merge flag there. No Hermes runtime changes are needed.
 
 ## Cursor
 
@@ -32,4 +32,4 @@ Keep root policy changes human-owned. No Cursor-specific credential, role overri
 
 If you honor **AGENTS.md**, you honor **agent-policy** and **signed-bot-commit**. Read the referenced skills and invoke the same helper after policy checks and explicit authorization, regardless of whether your runtime has a native skill loader.
 
-When the necessary instructions, App environment, or publishing tools are unavailable, stop and report the missing prerequisite. Do not fall back to raw Git, human credentials, or automatic merging. Humans review and merge.
+After tests, policy checks, and reviewed staging, run `node scripts/agent-pr.mjs --message "docs: clarify agent contracts"` as the final step only when publication is authorized. When the necessary instructions, App environment, or publishing tools are unavailable, stop with uncommitted changes and report the missing prerequisite. Do not fall back to raw Git, human credentials, or automatic merging. Humans review and merge by default; [POLICY.md](POLICY.md) describes the separate opt-in.
