@@ -2,12 +2,14 @@
 
 Choose a pinned public Action or vendor the Action and its scripts. Both options use ordinary GitHub files and Actions: no package registry, private-package infrastructure, GitHub App credentials, or custom secrets are required for the trailer check.
 
+For the complete bot-identity standard, start with [ONBOARDING.md](ONBOARDING.md): register your own App from the manifest, configure the publisher, and protect the branch. This page covers the check's distribution options, not registration of a shared maintainer App.
+
 ## Reference the public Action
 
 1. Review the [consumer workflow](../examples/consumer-repo/.github/workflows/check-agent-trailers.yml) and copy it to `.github/workflows/check-agent-trailers.yml` in the consuming repository. Merge with any existing workflow instead of overwriting it blindly.
 2. Keep `actions/checkout` pointed at the **consumer repository** with `fetch-depth: 0` and `persist-credentials: false`. The Action needs its complete PR history, not a checkout of this pack.
 3. Keep the pack's `uses:` reference pinned to a reviewed, full commit SHA. The example references `R4yHarris/github-agent-contracts` at a revision containing the Action and both scripts. Review changes before updating the pin; do not switch to a moving `main` reference for convenience.
-4. Enable Actions in the consumer and ensure its Actions policy permits `actions/checkout` and the referenced public Action. After a successful PR run, a human can make the trailer job a required check in repository rules.
+4. Enable Actions in the consumer and ensure its Actions policy permits `actions/checkout` and the referenced public Action. After a successful PR run, a human must require the `check-agent-trailers` job in protected-branch rules for the standard to be enforced.
 
 GitHub downloads the referenced pack revision separately from the consumer checkout. The composite Action finds its scripts relative to `github.action_path`, while the runner inspects Git history in the consumer's working directory. **This option does not require copying `scripts/` into the consumer.** It also does not install a local trailer-checking CLI there.
 
@@ -74,6 +76,6 @@ Before requiring the check, verify a PR with valid trailers passes and a marked 
 ## Adopt the other contracts
 
 - Merge the relevant rules from [AGENTS.md](../AGENTS.md) and [Copilot instructions](../.github/copilot-instructions.md) into the consumer's instructions. Replace this pack's hard-coded workspace name, bootstrap exceptions, file references, and commands with the consumer's own rules. Do not overwrite existing policies.
-- Import selected [skills](../skills/) through the consuming agent's supported discovery mechanism. For supported Copilot / VS Code versions, copy skill directories into `.github/skills/`. Read-only MCP allowlists and approved safe outputs still apply; enabling the trailer check grants no GitHub write permissions.
-- GitHub App identity is optional for installing this check. Follow the [identity guide](github-app-agent-identity.md) only when an operator separately provisions an App. Do not create credential files or invent credentials as part of adoption.
+- Copy the [commit skill](../skills/signed-bot-commit/SKILL.md) referenced by AGENTS.md and follow [HARNESSES.md](HARNESSES.md) for the minimal harness pointers. Copilot configuration is AGENTS.md plus its Copilot instructions; no additional skill-autodiscovery configuration is required. Read-only MCP allowlists and approved safe outputs still apply.
+- GitHub App identity is optional for installing the trailer check alone, but required for App-authenticated agent publication. Follow the [identity guide](github-app-agent-identity.md) and manifest-first onboarding to provision a user/org-owned App, not a maintainer App for private repositories. Do not create credential files or invent credentials as part of adopting the files.
 - The [issue clarifier](../.github/workflows-src/issue-clarifier.md) is optional and independent of trailer checking. Keep it as Markdown source unless `gh aw` is already available; do not handwrite compiled lockfiles or install `gh-aw` as part of this adoption procedure.

@@ -1,0 +1,19 @@
+{
+  "name": "YOUR-ACCOUNT-agent-coder",
+  "url": "https://github.com/R4yHarris/github-agent-contracts",
+  "description": "User-owned GitHub App for attributable agent commits and reviewed pull requests.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://example.invalid/github/webhook",
+    "active": false
+  },
+  "redirect_url": "https://example.invalid/app-manifest/callback",
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "metadata": "read",
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write"
+  },
+  "default_events": []
+}
