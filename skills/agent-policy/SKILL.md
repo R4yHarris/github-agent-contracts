@@ -29,7 +29,19 @@ The capabilities are `commit_branch`, `open_pr`, `comment`, `label`, `merge`, `p
 
 Use `scripts/agent-pr.mjs` and `skills/signed-bot-commit/SKILL.md` for authorized coder publication. The publisher checks local policy before key access, verifies the default branch's human-reviewed policy and the committed copy, and refuses to publish root-policy edits. It requires both coder `commit_branch` and `open_pr`.
 
-The coder publisher has no role/policy override and no merge, protected-push, or deploy implementation. Do not use raw Git or MCP tools to do what the helper refuses. A policy grant cannot create a missing executor or bypass stricter repository rules. Default remains human-only merge and no deploys.
+The coder publisher has no role/policy override, protected-push, or deploy implementation. Default remains human-only merge and no deploys. A merge grant alone never merges anything: only an explicitly authorized `--merge-when-green` invocation can request the conditional merge flow. Do not use raw Git or MCP tools to do what the helper refuses.
+
+## Opt-in merge
+
+A **human** must allow `merge` in root `agent-policy.yml` before the flag works. In this format, that means adding `merge` to `roles.coder.allow` and publishing the grant on the default branch, not adding a literal `merge: allow` field. The publisher remains coder; a merger-role grant cannot authorize it. Never make this policy change yourself.
+
+```bash
+node scripts/load-agent-policy.mjs --role coder --capability merge
+```
+
+The flag requires matching local, committed, and reviewed policy, plus App Checks read permission and explicit human authorization for the merge and remote-branch deletion. Policy is reloaded during the wait and immediately before the merge. A denial or revoked grant stops the flow.
+
+Require a successful GitHub Actions `check-agent-trailers` run on the exact PR head SHA and GitHub's merge requirements. Draft readiness is not approval. Never self-approve, squash, force-push, push main, change branch rules, or enable GitHub auto-merge. The helper creates a merge commit, then deletes only the unchanged remote feature branch after confirmed success. See `docs/POLICY.md` for wait limits and partial-failure handling.
 
 Comments and labels must pass the same policy check in an approved safe-output handler; do not enable direct MCP write tools just because the capability is listed. If the handler cannot enforce policy, stop and ask a human to publish the output.
 

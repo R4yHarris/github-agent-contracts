@@ -242,6 +242,198 @@ test("missing, invalid, or insufficient local policy denies publication before c
   }
 });
 
+test("--merge-when-green is opt-in and requires the current coder role to allow merge", async () => {
+  assert.equal(parseArgs(["--message", "feat: helper", "--merge-when-green"]).mergeWhenGreen, true);
+  assert.equal(parseArgs(["--message", "feat: helper"]).mergeWhenGreen, undefined);
+  for (const source of [policySource, policySource.replace(/merger:\r?\n    allow: \[\]/, "merger:\n    allow: [merge]")]) {
+    const mock = mockPublication();
+    mock.dependencies.loadPolicy = () => parseAgentPolicy(source);
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.commands.length, 0);
+    assert.equal(mock.requests.length, 0);
+  }
+});
+
+test("--merge-when-green also requires merge in the reviewed default-branch policy", async () => {
+  const mock = mockPublication();
+  mock.dependencies.loadPolicy = () => parseAgentPolicy(policySource.replace("comment, label", "comment, label, merge"));
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+  assert.equal(mock.requests.at(-1).method, "DELETE");
+});
+
+function mockMergePublication({ draft = false, existing = true, checkRuns } = {}) {
+  const mock = mockPublication({ pullRequests: existing ? [{ number: 7 }] : [] });
+  const source = policySource.replace("comment, label", "comment, label, merge");
+  const pull = {
+    number: 7, state: "open", merged: false, draft, mergeable: true, mergeable_state: "clean",
+    head: { sha: commitSha, ref: "feat/bot-helper", repo: { full_name: repository.full_name } },
+    base: { ref: "main", repo: { full_name: repository.full_name } },
+  };
+  const greenCheck = { name: "check-agent-trailers", head_sha: commitSha, status: "completed", conclusion: "success", app: { slug: "github-actions" } };
+  let elapsed = 0;
+  let listReads = 0;
+  mock.dependencies.clock = () => elapsed;
+  mock.dependencies.wait = async (duration) => { elapsed += duration; };
+  mock.dependencies.loadPolicy = () => parseAgentPolicy(source);
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    if (command === "gh" && args[1] === "ready") pull.draft = false;
+    const output = originalRun(command, args, options);
+    return args[0] === "show" ? source : output;
+  };
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = async (url, options) => {
+    let response;
+    if (url.includes("/contents/agent-policy.yml")) response = { ...approvedPolicyFile, content: Buffer.from(source).toString("base64") };
+    else if (url.includes("/pulls?")) response = ++listReads === 1 && !existing ? [] : [{ number: 7 }];
+    else if (url.endsWith("/pulls/7")) response = pull;
+    else if (url.includes("/check-runs?")) {
+      const runs = typeof checkRuns === "function" ? checkRuns(greenCheck) : checkRuns ?? [greenCheck];
+      response = { total_count: runs.length, check_runs: runs };
+    } else if (url.endsWith("/pulls/7/merge")) response = { merged: true, sha: "b".repeat(40) };
+    else if (url.includes("/git/ref/heads/")) response = { ref: "refs/heads/feat/bot-helper", object: { type: "commit", sha: commitSha } };
+    else if (url.includes("/git/refs/heads/") || options.method === "DELETE") response = new Response(null, { status: 204 });
+    else return originalFetch(url, options);
+    mock.requests.push({ url, ...options });
+    return response instanceof Response ? response : Response.json(response);
+  };
+  return { ...mock, pull, elapsed: () => elapsed };
+}
+
+test("--merge-when-green merges a ready or draft PR by exact SHA and only then deletes its branch", async () => {
+  for (const setup of [{}, { draft: true }, { draft: true, existing: false }]) {
+    const mock = mockMergePublication(setup);
+    const result = await publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies);
+    assert.equal(result.merged, true);
+    assert.equal(result.remoteBranchDeleted, true);
+    assert.equal(result.mergeCommit, "b".repeat(40));
+    const merge = mock.requests.find((call) => call.url.endsWith("/pulls/7/merge"));
+    assert.equal(merge.method, "PUT");
+    assert.deepEqual(JSON.parse(merge.body), { sha: commitSha, merge_method: "merge", commit_message: buildCommitMessage("feat: helper", undefined, AGENT) });
+    const tokenRequest = mock.requests.find((call) => call.url.endsWith("/access_tokens"));
+    assert.deepEqual(JSON.parse(tokenRequest.body).permissions, { contents: "write", pull_requests: "write", checks: "read" });
+    const deletion = mock.requests.find((call) => call.url.includes("/git/refs/heads/"));
+    assert.equal(deletion.method, "DELETE");
+    assert.ok(deletion.url.endsWith("/git/refs/heads/feat%2Fbot-helper"));
+    assert.ok(mock.requests.indexOf(deletion) > mock.requests.indexOf(merge));
+    assert.equal(mock.commands.some((call) => call.command === "gh" && call.args[1] === "ready"), setup.draft === true);
+    assert.ok(!mock.commands.some((call) => call.args.some((argument) => ["--approve", "--squash", "--force", "--admin", "--auto"].includes(argument))));
+    assert.ok(mock.commands.filter((call) => call.args[0] === "push").every((call) => call.args.at(-1).endsWith(":refs/heads/feat/bot-helper")));
+    assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
+  }
+});
+
+test("--merge-when-green never attempts a merge or branch deletion when the trailer check is red", async () => {
+  for (const conclusion of ["failure", "cancelled", "timed_out", "neutral", "skipped"]) {
+    const mock = mockMergePublication({ draft: true, checkRuns: (green) => [{ ...green, conclusion }] });
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /did not succeed on the head SHA/);
+    assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge") || call.url.includes("/git/refs/heads/")));
+    assert.ok(!mock.commands.some((call) => call.command === "gh" && call.args[1] === "ready"));
+  }
+});
+
+test("--merge-when-green waits for a pending check on the same head SHA", async () => {
+  let reads = 0;
+  const mock = mockMergePublication({ checkRuns: (green) => ++reads === 1 ? [{ ...green, status: "in_progress", conclusion: null }] : [green] });
+  assert.equal((await publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies)).merged, true);
+  assert.equal(mock.elapsed(), 5_000);
+});
+
+test("a merge grant alone never merges without --merge-when-green", async () => {
+  const mock = mockMergePublication();
+  const result = await publishAgentPr({ message: "feat: helper" }, mock.dependencies);
+  assert.equal(result.merged, undefined);
+  assert.ok(!mock.requests.some((call) => call.url.includes("/check-runs?") || call.url.endsWith("/merge") || call.url.includes("/git/refs/heads/")));
+  const tokenRequest = mock.requests.find((call) => call.url.endsWith("/access_tokens"));
+  assert.equal(JSON.parse(tokenRequest.body).permissions.checks, undefined);
+});
+
+test("--merge-when-green rejects another PR head or a check for another SHA, name, or App", async () => {
+  const moved = mockMergePublication();
+  moved.pull.head.sha = "c".repeat(40);
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, moved.dependencies), /no longer matches the published head SHA/);
+  assert.ok(!moved.requests.some((call) => call.url.endsWith("/merge")));
+  for (const change of [{ head_sha: "c".repeat(40) }, { name: "another-check" }, { app: { slug: AGENT } }]) {
+    const mock = mockMergePublication({ checkRuns: (green) => [{ ...green, ...change }] });
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /GitHub Actions check on the exact published head SHA/);
+    assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge") || call.url.includes("/git/refs/heads/")));
+  }
+});
+
+test("--merge-when-green times out on missing checks or outstanding review requirements without self-approval", async () => {
+  for (const state of ["missing-check", "review-required"]) {
+    const mock = mockMergePublication(state === "missing-check" ? { checkRuns: [] } : {});
+    if (state === "review-required") mock.pull.mergeable_state = "blocked";
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /Timed out waiting/);
+    assert.ok(mock.elapsed() <= 600_000);
+    assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge") || call.url.includes("/reviews") || call.url.includes("/git/refs/heads/")));
+    assert.ok(!mock.commands.some((call) => call.args.includes("review") || call.args.includes("--approve")));
+    assert.equal(mock.requests.at(-1).method, "DELETE");
+  }
+});
+
+test("--merge-when-green rechecks the exact head after marking a draft ready", async () => {
+  let reads = 0;
+  const mock = mockMergePublication({ draft: true, checkRuns: (green) => [{ ...green, conclusion: ++reads === 1 ? "success" : "failure" }] });
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /did not succeed/);
+  assert.ok(mock.commands.some((call) => call.command === "gh" && call.args[1] === "ready"));
+  assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge")));
+});
+
+test("--merge-when-green respects a merge grant revoked while waiting", async () => {
+  const mock = mockMergePublication({ checkRuns: (green) => [{ ...green, status: "in_progress", conclusion: null }] });
+  const originalWait = mock.dependencies.wait;
+  const originalLoadPolicy = mock.dependencies.loadPolicy;
+  let revoked = false;
+  mock.dependencies.loadPolicy = (options) => revoked ? parseAgentPolicy(policySource) : originalLoadPolicy(options);
+  mock.dependencies.wait = async (duration) => {
+    await originalWait(duration);
+    revoked = true;
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge")));
+});
+
+test("--merge-when-green revalidates the reviewed merge grant immediately before merging", async () => {
+  const mock = mockMergePublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  let policyReads = 0;
+  mock.dependencies.fetchImpl = (url, options) => {
+    if (url.includes("/contents/agent-policy.yml") && ++policyReads === 3) return Response.json(approvedPolicyFile);
+    return originalFetch(url, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /policy denies coder\.merge/);
+  assert.ok(mock.requests.some((call) => call.url.includes("/check-runs?")));
+  assert.ok(!mock.requests.some((call) => call.url.endsWith("/merge")));
+});
+
+test("--merge-when-green never deletes a branch after an unconfirmed or rejected merge", async () => {
+  for (const response of [Response.json({ merged: false }), Response.json({ message: access.token }, { status: 409 })]) {
+    const mock = mockMergePublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => url.endsWith("/merge") ? response : originalFetch(url, options);
+    await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), (error) => {
+      assert.match(error.message, /did not confirm a successful merge|HTTP 409/);
+      assert.ok(!error.message.includes(access.token));
+      return true;
+    });
+    assert.ok(!mock.requests.some((call) => call.url.includes("/git/refs/heads/")));
+    assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
+  }
+});
+
+test("--merge-when-green preserves a branch that advanced after the confirmed merge", async () => {
+  const mock = mockMergePublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = (url, options) => url.includes("/git/ref/heads/")
+    ? Response.json({ ref: "refs/heads/feat/bot-helper", object: { type: "commit", sha: "c".repeat(40) } }) : originalFetch(url, options);
+  await assert.rejects(publishAgentPr({ message: "feat: helper", mergeWhenGreen: true }, mock.dependencies), /The PR was merged; remote-branch cleanup may be incomplete/);
+  assert.ok(mock.requests.some((call) => call.url.endsWith("/merge")));
+  assert.ok(!mock.requests.some((call) => call.url.includes("/git/refs/heads/")));
+});
+
 test("the coder CLI refuses merge, protected push, deploy, and role or policy overrides", async () => {
   for (const flag of ["--merge", "--push-protected", "--deploy", "--role", "--policy"]) {
     const mock = mockPublication();
