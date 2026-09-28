@@ -7,7 +7,7 @@ This is community OSS for GitHub, not a GitHub replacement.
 ## Enable agent identity in 3 steps
 
 1. **[Register App from manifest](docs/app-manifest.json).** Create an App owned by you or your organization, keep it private to that account, and choose **Only select repositories** during installation.
-2. **Configure and copy.** Supply `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` outside git, then copy AGENTS.md, the signed-bot-commit skill, publisher, and check Action/workflow as listed in [ONBOARDING.md](docs/ONBOARDING.md). CI stores the key in the `GITHUB_APP_PRIVATE_KEY` secret.
+2. **Configure and copy.** Supply `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` outside git, then copy AGENTS.md, the policy and commit skills, publisher/loader, and check Action/workflow as listed in [ONBOARDING.md](docs/ONBOARDING.md). A human installs the root capability policy. CI stores the key in the `GITHUB_APP_PRIVATE_KEY` secret.
 3. **Protect and publish.** Require `check-agent-trailers`, disallow direct pushes to `main` and agent bypass, and reserve merges for humans. Tell the agent: "Use signed-bot-commit / scripts/agent-pr.mjs for all publish."
 
 The manifest is a static template, not a hosted registration button. An owner-controlled manifest callback is a follow-on; placeholder URLs must be replaced before completing GitHub's flow. The [onboarding guide](docs/ONBOARDING.md) describes that boundary and the manual registration fallback.
@@ -27,6 +27,7 @@ Use it so Copilot, [GitHub Agentic Workflows](https://github.com/github/gh-aw), 
 | Contract | Where |
 | --- | --- |
 | Agent instructions | `AGENTS.md` |
+| Default-deny capabilities | `examples/agent-policy.yml` + `docs/POLICY.md` |
 | Copilot instructions | `.github/copilot-instructions.md` |
 | Portable skills | `skills/*/SKILL.md` |
 | Bot identity | `docs/github-app-agent-identity.md` |
@@ -52,6 +53,12 @@ See [HARNESSES.md](docs/HARNESSES.md) for the minimal integration in each runtim
 ## Use in another repo
 
 Follow the [adoption guide](docs/adopt.md) and copy the [consumer workflow](examples/consumer-repo/.github/workflows/check-agent-trailers.yml). Reference the pinned public Action without copying scripts, or vendor the Action and both scripts together. No package registry or GitHub App credentials are needed for the trailer check.
+
+## Capability policy
+
+Hermes, Copilot, Claude Code, and Cursor share one human-owned root `agent-policy.yml`. The [example](examples/agent-policy.yml) allows coder branch commits, draft PRs, comments, and labels; merger and deploy allow-lists are empty. Missing policy denies publication, and agents must not edit policy to grant themselves rights.
+
+Read [POLICY.md](docs/POLICY.md) for the three permission layers and human bootstrap, and [ROLES.md](docs/ROLES.md) for separate role Apps and a WSL host holding only the coder key. The coder publisher has no merge, protected-push, or deployment mode. No active root policy or hosted control plane is installed by this pack.
 
 ## Non-goals
 

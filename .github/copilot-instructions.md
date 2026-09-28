@@ -6,6 +6,10 @@ This workspace is **github-agent-contracts** only.
 - Edit no paths outside this repository.
 - Do not request or embed credentials.
 - Prefer Node 20 ESM scripts with zero dependencies.
+- Load root `agent-policy.yml` through `scripts/load-agent-policy.mjs` and follow `skills/agent-policy/SKILL.md` before publication or GitHub writes. Missing or invalid policy denies all actions; never fall back to the example or a different role.
+- Agents must not edit, create, replace, or delete `agent-policy.yml` to grant themselves rights, or modify the executor to bypass a denial. A human reviews and publishes active policy changes.
+- App permissions, branch protection/environments, and policy are cumulative gates. The coder publisher requires `commit_branch` and `open_pr`, checks the reviewed default-branch policy, and has no merge/protected-push/deploy or role-override mode. Humans merge; no deploys.
+- Follow `docs/ROLES.md`: use separate role Apps, and keep only the coder key on the WSL orchestration host. Never use merger/deploy credentials or a human token there.
 - Agents must commit and publish through `node scripts/agent-pr.mjs`, never raw `git commit`, `git push`, or a separate `gh pr create`. Never commit as R4yHarris or use a human token as a fallback.
 - Follow `skills/signed-bot-commit/SKILL.md`. App environment variables never authorize use of the signed-in human's identity, and missing App configuration means stop. Never merge or enable auto-merge.
 - Invoke the helper only after authorization for commit, push, and a draft PR. A request to stop after writing files and testing means no publication. Humans may perform their own bootstrap commits.
@@ -18,5 +22,7 @@ This workspace is **github-agent-contracts** only.
 Authorized publication example:
 
 ```bash
+node scripts/load-agent-policy.mjs --role coder --capability commit_branch
+node scripts/load-agent-policy.mjs --role coder --capability open_pr
 node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model unknown --files README.md
 ```

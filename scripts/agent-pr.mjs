@@ -6,6 +6,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { checkMessage } from "./check-agent-trailers.mjs";
+import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy, requireCapability } from "./load-agent-policy.mjs";
 
 class AgentPrError extends Error {}
 
@@ -32,7 +33,7 @@ export function createAppJwt(appId, privateKey, now = Date.now()) {
   }
 }
 
-async function githubRequest(path, token, { method = "GET", body, fetchImpl = globalThis.fetch } = {}) {
+async function githubRequest(path, token, { method = "GET", body, fetchImpl = globalThis.fetch, allowMissing = false } = {}) {
   let response;
   try {
     response = await fetchImpl(`https://api.github.com${path}`, {
@@ -51,6 +52,7 @@ async function githubRequest(path, token, { method = "GET", body, fetchImpl = gl
   } catch {
     throw new AgentPrError("GitHub API request failed; check connectivity and authentication.");
   }
+  if (allowMissing && response.status === 404) return undefined;
   if (!response.ok) {
     throw new AgentPrError(`GitHub API request failed (HTTP ${Number(response.status)}).`);
   }
@@ -149,6 +151,8 @@ export function parseArgs(argv) {
         throw new AgentPrError("--message and --model each need a value.");
       }
       options[argument === "--model" ? "model" : "message"] = value;
+    } else if (["--merge", "--push-protected", "--push_protected", "--deploy"].includes(argument)) {
+      throw new AgentPrError("agent-pr is coder-only: merge, push_protected, and deploy are not implemented. Human-only merge and no deploys remain enforced.");
     } else {
       throw new AgentPrError("Unknown argument; use --help for usage.");
     }
@@ -199,9 +203,13 @@ export async function publishAgentPr(options, {
   env = process.env,
   fetchImpl = globalThis.fetch,
   readPrivateKey = (path) => readFileSync(path),
+  loadPolicy = loadAgentPolicy,
   run = runCommand,
   now = Date.now(),
 } = {}) {
+  const policy = loadPolicy({ cwd });
+  requireCapability(policy, "coder", "commit_branch");
+  requireCapability(policy, "coder", "open_pr");
   validateCommitInput(options.message, options.model);
   const appId = env.GITHUB_APP_ID;
   if (!appId || !/^[1-9][0-9]*$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY_PATH) {
@@ -246,11 +254,17 @@ export async function publishAgentPr(options, {
   }
   invoke("gh", ["--version"], "GitHub CLI availability check");
   const readStaged = () => git(["diff", "--cached", "--name-only", "--no-renames", "-z"], "Staged-file lookup").split("\0").filter(Boolean);
+  const rejectPolicyChanges = (changes) => {
+    if (changes.some((file) => file.toLowerCase() === "agent-policy.yml")) {
+      throw new AgentPrError("Agents cannot publish changes to root agent-policy.yml; a human must review and publish policy changes.");
+    }
+  };
   const checkIndex = () => {
     const indexed = git(["ls-files", "--cached", "-z"], "Index lookup").split("\0").filter(Boolean);
     for (const file of indexed) safeFile(file, cwd, privateKeyPath);
   };
   const files = [...new Set((options.files ?? []).map((file) => safeFile(file, cwd, privateKeyPath)))];
+  rejectPolicyChanges(files);
   for (const file of files) {
     try {
       if (lstatSync(resolve(cwd, file)).isDirectory()) {
@@ -263,6 +277,7 @@ export async function publishAgentPr(options, {
     }
   }
   const staged = readStaged();
+  rejectPolicyChanges(staged);
   checkIndex();
   for (const file of staged) safeFile(file, cwd, privateKeyPath);
   if (files.length && staged.some((file) => !files.includes(file))) {
@@ -305,11 +320,44 @@ export async function publishAgentPr(options, {
       throw new AgentPrError("GitHub did not return an active repository matching origin.");
     }
     if (branch === repository.default_branch) throw new AgentPrError("Refusing to publish directly to the default branch.");
+    const approvedFile = await githubRequest(`${repoPath}/contents/agent-policy.yml?ref=${encodeURIComponent(repository.default_branch)}`, token, { fetchImpl });
+    if (
+      approvedFile?.type !== "file" || approvedFile.encoding !== "base64" ||
+      typeof approvedFile.content !== "string" || approvedFile.content.length > 100_000
+    ) {
+      throw new AgentPrError("Cannot verify agent-policy.yml on the default branch; refusing publication.");
+    }
+    const approvedPolicy = parseAgentPolicy(Buffer.from(approvedFile.content, "base64").toString("utf8"));
+    requireCapability(approvedPolicy, "coder", "commit_branch");
+    requireCapability(approvedPolicy, "coder", "open_pr");
+    const verifyApprovedPolicy = (candidate) => {
+      for (const role of Object.keys(approvedPolicy.roles)) {
+        const approved = approvedPolicy.roles[role].allow;
+        const actual = candidate.roles[role].allow;
+        if (actual.length !== approved.length || actual.some((capability) => !approved.includes(capability))) {
+          throw new AgentPrError("agent-policy.yml differs from the default branch's reviewed policy; refusing publication.");
+        }
+      }
+    };
+    verifyApprovedPolicy(policy);
+    const checkProtectedBranch = async () => {
+      const rules = await githubRequest(`${repoPath}/rules/branches/${encodeURIComponent(branch)}`, token, { fetchImpl });
+      const remoteBranch = await githubRequest(`${repoPath}/branches/${encodeURIComponent(branch)}`, token, { fetchImpl, allowMissing: true });
+      if (!Array.isArray(rules) || (remoteBranch !== undefined && (remoteBranch?.name !== branch || typeof remoteBranch.protected !== "boolean"))) {
+        throw new AgentPrError("Cannot verify branch protection; refusing publication.");
+      }
+      if (rules.length || remoteBranch?.protected) {
+        requireCapability(approvedPolicy, "coder", "push_protected");
+        throw new AgentPrError("Protected-branch publication is unsupported by the coder helper, even with a policy grant.");
+      }
+    };
+    await checkProtectedBranch();
     checkBranch();
     if (files.length) {
       git(["add", "--", ...files], "Staging selected files", { env: { ...baseEnv, GIT_LITERAL_PATHSPECS: "1" } });
     }
     const selected = readStaged();
+    rejectPolicyChanges(selected);
     checkIndex();
     for (const file of selected) safeFile(file, cwd, privateKeyPath);
     if (!selected.length || (files.length && selected.some((file) => !files.includes(file)))) {
@@ -337,6 +385,9 @@ export async function publishAgentPr(options, {
     }
     const committedFiles = git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], "Committed file verification").split("\0").filter(Boolean);
     for (const file of committedFiles) safeFile(file, cwd, privateKeyPath);
+    rejectPolicyChanges(git(["diff-tree", "--root", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", actual[0]], "Committed policy-change verification").split("\0").filter(Boolean));
+    verifyApprovedPolicy(parseAgentPolicy(git(["show", `${actual[0]}:agent-policy.yml`], "Committed policy verification")));
+    await checkProtectedBranch();
     checkBranch();
     const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
     git(["push", "--no-follow-tags", pushUrl, `${actual[0]}:refs/heads/${branch}`], "Branch push", {
@@ -365,7 +416,7 @@ export async function publishAgentPr(options, {
     }
     result = { commit: actual[0], botName, createdPullRequest: !pullRequests.length };
   } catch (error) {
-    const detail = error instanceof AgentPrError ? error.message : "Publication failed; details were withheld to protect credentials.";
+    const detail = error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "Publication failed; details were withheld to protect credentials.";
     failure = new AgentPrError(`${detail}${committed ? " The local commit remains; do not create a duplicate commit to retry." : ""}`);
   } finally {
     try {
@@ -392,8 +443,11 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
 
 Without --files, commits the reviewed staged changes. --files must be last.
 Requires Node 20+, Git, gh, GITHUB_APP_ID, and GITHUB_APP_PRIVATE_KEY_PATH.
+Requires root agent-policy.yml with coder commit_branch and open_pr grants,
+matching the reviewed policy on origin's default branch. No example fallback.
 Discovers your configured App's bot identity, pushes the current feature branch to origin,
 and creates a draft PR only when no open PR exists. Never force-pushes or merges.
+No role/policy override, merge, push_protected, or deploy flags are supported.
 An invocation authorizes commit, push, and PR creation. Keep secrets out of arguments.
 `);
     return 0;
@@ -404,7 +458,7 @@ An invocation authorizes commit, push, and PR creation. Keep secrets out of argu
     stdout.write(result.createdPullRequest ? "Created a draft pull request.\n" : "Updated the branch for its existing pull request.\n");
     return 0;
   } catch (error) {
-    stderr.write(`${error instanceof AgentPrError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);
+    stderr.write(`${error instanceof AgentPrError || error instanceof AgentPolicyError ? error.message : "agent-pr failed; details were withheld to protect credentials."}\n`);
     return 1;
   }
 }

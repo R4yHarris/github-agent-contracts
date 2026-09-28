@@ -13,11 +13,11 @@ Never recommend the maintainer's `r4yharris-agent-coder` App for private or prod
 
 ## Do
 
-1. Read `AGENTS.md` and confirm the human authorized **commit, push, and draft PR creation**. A request to stop after editing or testing prohibits running the helper.
+1. Read `AGENTS.md`, load the root policy through `scripts/load-agent-policy.mjs`, and follow `skills/agent-policy/SKILL.md`. Require coder `commit_branch` and `open_pr`, then confirm the human authorized **commit, push, and draft PR creation**. Missing or denied policy means stop. A request to stop after editing or testing prohibits running the helper.
 2. Use only `node scripts/agent-pr.mjs` from the repository root. Do not run raw `git commit`, `git push`, or a separate `gh pr create`; do not fall back to a human identity or credentials.
 3. Confirm Node 20+, Git, and `gh` are available. The human supplies `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` through the environment; CI uses the `GITHUB_APP_PRIVATE_KEY` secret through an approved temporary-file bootstrap. Never read the PEM into chat, display tokens, or commit `.env` or private-key files. The helper does not load `.env` automatically. Missing App configuration means stop, not use the signed-in human.
 4. Review the staged changes, or select individual repository files with `--files`. Do not pass directories. The helper refuses unrelated staged files when explicit files are selected. Run `node --test tests/*.test.mjs` before publishing.
-5. Keep the current branch a feature branch. The helper uses only origin's repository, refuses default-branch publication, and never force-pushes or merges. Require `check-agent-trailers` and human approval on protected branches, grant the App no bypass, and leave merging to humans.
+5. Keep the current branch an unprotected feature branch. The helper uses only origin's repository, checks branch protection and active rules, and never force-pushes, merges, or deploys. Require `check-agent-trailers` and human approval on protected branches, grant the App no bypass, and leave merging to humans.
 
 ## Identity and trailers
 
@@ -34,6 +34,8 @@ Use `--model` to replace `unknown` when the actual model is known. It checks the
 
 ## Usage
 
+The human must first publish root `agent-policy.yml` on the default branch and include its reviewed version in the feature branch. See `docs/POLICY.md`. The helper checks that the local and committed policy match the reviewed grants, refuses root-policy edits, and provides no role or policy-path override. Agents must not change policy to authorize themselves.
+
 With reviewed changes already staged:
 
 ```bash
@@ -46,7 +48,7 @@ To stage and commit named files, put `--files` last:
 node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --files README.md AGENTS.md
 ```
 
-`--help` does not read the key or contact GitHub. Normal invocation signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. It makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
+`--help` does not read policy, the key, or contact GitHub. Normal invocation first requires the local coder grants, then signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. After checking the approved policy and branch protections, it makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
 
 ## Failure handling
 
@@ -58,6 +60,8 @@ Despite this skill's name, the current helper creates **unsigned Git commits**. 
 
 - Commit as R4yHarris or another human, including during bootstrap. A human can commit a bootstrap slice themselves.
 - Force-push any branch or merge a PR.
+- Deploy, switch to a merger/deploy App, or use a policy grant to bypass the coder helper's fixed capabilities.
+- Edit, replace, or delete root `agent-policy.yml` to grant yourself rights or publish a policy change through this helper.
 - Amend someone else's commit.
 - Write tokens, App private keys, or signing keys into the repository.
 - Bypass a repository's signing or human-approval requirement.

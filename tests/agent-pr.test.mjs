@@ -9,7 +9,10 @@ import {
   buildCommitMessage, createAppJwt, main,
   mintInstallationToken, parseArgs, parseOrigin, publishAgentPr,
 } from "../scripts/agent-pr.mjs";
+import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy } from "../scripts/load-agent-policy.mjs";
 
+const policySource = readFileSync(new URL("../examples/agent-policy.yml", import.meta.url), "utf8");
+const approvedPolicyFile = { type: "file", encoding: "base64", content: Buffer.from(policySource).toString("base64") };
 const AGENT = "example-org-agent";
 const BOT_NAME = `${AGENT}[bot]`;
 const BOT_EMAIL = `789+${BOT_NAME}@users.noreply.github.com`;
@@ -28,6 +31,9 @@ function mockGitHub(responses) {
   const fetchImpl = async (url, options) => {
     calls.push({ url, ...options });
     if (url === `https://api.github.com/users/${encodeURIComponent(BOT_NAME)}`) return Response.json(bot);
+    if (url.endsWith("/contents/agent-policy.yml?ref=main")) return Response.json(approvedPolicyFile);
+    if (url.includes("/rules/branches/")) return Response.json([]);
+    if (url.includes("/branches/")) return Response.json({ name: decodeURIComponent(url.split("/branches/")[1]), protected: false });
     assert.ok(responses.length, "Unexpected GitHub request");
     const response = responses.shift();
     return response instanceof Response ? response : Response.json(response);
@@ -108,6 +114,7 @@ function mockPublication({ branch = "feat/bot-helper", staged = ["README.md"], i
   const dependencies = {
     ...github,
     cwd,
+    loadPolicy: () => parseAgentPolicy(policySource),
     env: {
       GITHUB_APP_ID: "123",
       GITHUB_APP_PRIVATE_KEY_PATH: "not-read.pem",
@@ -129,7 +136,8 @@ function mockPublication({ branch = "feat/bot-helper", staged = ["README.md"], i
       if (args[0] === "symbolic-ref") return branch;
       if (args[0] === "remote") return "git@github.com:example-owner/example-repo.git\n";
       if (args[0] === "config") return "";
-      if (args[0] === "diff") return staged.map((file) => `${file}\0`).join("");
+      if (args[0] === "show") return policySource;
+      if (args[0] === "diff" || args[0] === "diff-tree") return staged.map((file) => `${file}\0`).join("");
       if (args[0] === "ls-files" || args[0] === "ls-tree") return indexed.map((file) => `${file}\0`).join("");
       if (args.includes("commit")) { message = options.input; return "commit output"; }
       if (args[0] === "log") return [commitSha, BOT_NAME, BOT_EMAIL, BOT_NAME, BOT_EMAIL, message].join("\0");
@@ -218,6 +226,131 @@ test("an existing open PR is reused without running gh pr create", async () => {
   const result = await publishAgentPr({ message: "fix: helper" }, mock.dependencies);
   assert.equal(result.createdPullRequest, false);
   assert.ok(!mock.commands.some((call) => call.command === "gh" && call.args[0] === "pr"));
+});
+
+test("missing, invalid, or insufficient local policy denies publication before commands, key access, or network calls", async () => {
+  for (const source of [undefined, "default: allow", "version: 1\ndefault: deny\n", policySource.replace("open_pr, ", "")]) {
+    const mock = mockPublication();
+    mock.dependencies.loadPolicy = () => {
+      if (source === undefined) throw new AgentPolicyError("Missing policy; no capabilities are authorized.");
+      return parseAgentPolicy(source);
+    };
+    await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /policy|agent-policy/i);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.commands.length, 0);
+    assert.equal(mock.requests.length, 0);
+  }
+});
+
+test("the coder CLI refuses merge, protected push, deploy, and role or policy overrides", async () => {
+  for (const flag of ["--merge", "--push-protected", "--deploy", "--role", "--policy"]) {
+    const mock = mockPublication();
+    const output = [];
+    assert.equal(await main(["--message", "feat: helper", flag], {
+      ...mock.dependencies, stderr: { write: (text) => output.push(text) },
+    }), 2);
+    assert.ok(output.length);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.commands.length, 0);
+    assert.equal(mock.requests.length, 0);
+  }
+});
+
+test("policy edits cannot be staged or selected through the agent publisher", async () => {
+  for (const options of [{ files: ["agent-policy.yml"] }, {}]) {
+    const mock = mockPublication({ staged: ["agent-policy.yml"] });
+    await assert.rejects(publishAgentPr({ message: "feat: helper", ...options }, mock.dependencies), /cannot publish changes to root agent-policy/);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.requests.length, 0);
+  }
+});
+
+test("a different, missing, or denying default-branch policy prevents self-grants", async () => {
+  for (const response of [
+    Response.json({ message: "Not found" }, { status: 404 }),
+    Response.json({ ...approvedPolicyFile, content: Buffer.from("version: 1\ndefault: deny\n").toString("base64") }),
+    Response.json({ ...approvedPolicyFile, content: Buffer.from(policySource.replace("comment, label", "comment")).toString("base64") }),
+  ]) {
+    const mock = mockPublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => url.includes("/contents/agent-policy.yml") ? response : originalFetch(url, options);
+    await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /HTTP 404|policy denies|differs from/);
+    assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+    assert.equal(mock.requests.at(-1).method, "DELETE");
+  }
+});
+
+test("a protected branch or matching ruleset requires push_protected and is refused", async () => {
+  for (const protectedBy of ["legacy", "ruleset"]) {
+    const mock = mockPublication({ branch: "release" });
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (protectedBy === "ruleset" && url.includes("/rules/branches/")) return Response.json([{ type: "pull_request" }]);
+      if (protectedBy === "legacy" && url.endsWith("/branches/release") && !url.includes("/rules/branches/")) return Response.json({ name: "release", protected: true });
+      return originalFetch(url, options);
+    };
+    await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /policy denies coder\.push_protected/);
+    assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+    assert.equal(mock.requests.at(-1).method, "DELETE");
+  }
+});
+
+test("branch-protection lookup errors fail closed instead of assuming an unprotected branch", async () => {
+  const mock = mockPublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = (url, options) => url.includes("/rules/branches/")
+    ? Response.json({ message: access.token }, { status: 403 }) : originalFetch(url, options);
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /HTTP 403/);
+  assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+});
+
+test("a policy grant cannot enable protected pushes through the coder-only helper", async () => {
+  const source = policySource.replace("commit_branch,", "commit_branch, push_protected,");
+  const mock = mockPublication();
+  mock.dependencies.loadPolicy = () => parseAgentPolicy(source);
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = (url, options) => {
+    if (url.includes("/contents/agent-policy.yml")) return Response.json({ ...approvedPolicyFile, content: Buffer.from(source).toString("base64") });
+    if (url.includes("/rules/branches/")) return Response.json([{ type: "pull_request" }]);
+    return originalFetch(url, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /unsupported by the coder helper/);
+  assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+});
+
+test("a changed policy in the committed tree cannot hide behind a clean working copy", async () => {
+  const mock = mockPublication();
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => args[0] === "show"
+    ? policySource.replace("comment, label", "comment, label, merge") : originalRun(command, args, options);
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), (error) => {
+    assert.match(error.message, /differs from the default branch/);
+    assert.match(error.message, /local commit remains/);
+    return true;
+  });
+  assert.ok(!mock.commands.some((call) => call.args[0] === "push"));
+  assert.equal(mock.requests.at(-1).method, "DELETE");
+});
+
+test("new protection discovered after the commit prevents the push", async () => {
+  const mock = mockPublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  let protectionChecks = 0;
+  mock.dependencies.fetchImpl = (url, options) => {
+    if (url.includes("/rules/branches/") && ++protectionChecks === 2) return Response.json([{ type: "pull_request" }]);
+    return originalFetch(url, options);
+  };
+  await assert.rejects(publishAgentPr({ message: "feat: helper" }, mock.dependencies), /denies coder\.push_protected/);
+  assert.ok(mock.commands.some((call) => call.args.includes("commit")));
+  assert.ok(!mock.commands.some((call) => call.args[0] === "push"));
+});
+
+test("a new branch can be published when no applicable rules are returned", async () => {
+  const mock = mockPublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = (url, options) => url.includes("/branches/") && !url.includes("/rules/branches/")
+    ? Response.json({ message: "Not found" }, { status: 404 }) : originalFetch(url, options);
+  assert.equal((await publishAgentPr({ message: "feat: helper" }, mock.dependencies)).createdPullRequest, true);
 });
 
 test("an invalid or human account cannot stand in for the configured App bot", async () => {
@@ -423,6 +556,9 @@ test("local Git integration commits selected and staged files with bot provenanc
     ...args,
   ], { cwd: directory, env: gitEnvironment, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], ...options });
   localGit(["init", "--quiet", "--initial-branch=feat/test-publication", "--object-format=sha1"]);
+  writeFileSync(join(directory, "agent-policy.yml"), policySource);
+  localGit(["add", "--", "agent-policy.yml"]);
+  localGit(["-c", `user.name=${BOT_NAME}`, "-c", `user.email=${BOT_EMAIL}`, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "test: policy fixture"]);
   const github = mockGitHub([
     installation, access, repository, [], new Response(null, { status: 204 }),
     installation, access, repository, [{ number: 1 }], new Response(null, { status: 204 }),
@@ -430,6 +566,7 @@ test("local Git integration commits selected and staged files with bot provenanc
   const dependencies = {
     ...github,
     cwd: directory,
+    loadPolicy: loadAgentPolicy,
     env: { ...gitEnvironment, GITHUB_APP_ID: "123", GITHUB_APP_PRIVATE_KEY_PATH: "never-read.pem" },
     readPrivateKey: () => privateKey,
     run: (command, args, options) => {
@@ -444,7 +581,7 @@ test("local Git integration commits selected and staged files with bot provenanc
   const first = await publishAgentPr({ message: "feat: selected files", files: ["selected.txt"] }, dependencies);
   assert.match(first.commit, /^[0-9a-f]{40}$/);
   assert.equal(first.createdPullRequest, true);
-  assert.equal(localGit(["ls-tree", "-r", "--name-only", "HEAD"]).trim(), "selected.txt");
+  assert.equal(localGit(["ls-tree", "-r", "--name-only", "HEAD"]).trim(), "agent-policy.yml\nselected.txt");
   assert.equal(localGit(["log", "-1", "--format=%an%n%ae%n%cn%n%ce"]).trim(), [BOT_NAME, BOT_EMAIL, BOT_NAME, BOT_EMAIL].join("\n"));
   assert.ok(localGit(["log", "-1", "--format=%B"]).includes(`AI-Agent: ${AGENT}\nAI-Model: unknown`));
   writeFileSync(join(directory, "selected.txt"), "updated contents\n");
