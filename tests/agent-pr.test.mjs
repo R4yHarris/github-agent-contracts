@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   buildCommitMessage, createAppJwt, main,
-  mintInstallationToken, parseArgs, parseOrigin, publishAgentPr, upsertAgentRun,
+  mintInstallationToken, parseArgs, parseOrigin, publishAgentPr as publishAgentPrRaw, upsertAgentRun,
 } from "../scripts/agent-pr.mjs";
 import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy } from "../scripts/load-agent-policy.mjs";
 import { packAgentRun, parseTrailers } from "../scripts/parse-agent-run.mjs";
@@ -31,6 +31,10 @@ const runEnvironment = {
   AI_CONTEXT_USED: "18234", AI_CONTEXT_MAX: "200000", AI_CONTEXT_OUT: "2510", AI_SESSION: "ses_01K8", AI_TASK: "feat-auth",
 };
 const compactRun = "1|anthropic|claude-sonnet-4.5@20250901|h|18234/200000|2510|ses_01K8|feat-auth";
+
+function publishAgentPr(options, dependencies) {
+  return publishAgentPrRaw({ ...options, model: options.model ?? dependencies.env.AI_MODEL ?? "test-model" }, dependencies);
+}
 
 function mockGitHub(responses) {
   const calls = [];
@@ -172,22 +176,30 @@ test("origin parsing supports GitHub SSH and HTTPS without exposing credentials"
   }
 });
 
-test("CLI builds canonical trailers with unknown or a selected model", () => {
-  assert.equal(buildCommitMessage("feat: helper", undefined, AGENT), `feat: helper\n\nAI-Agent: ${AGENT}\nAI-Model: unknown\n`);
-  assert.match(buildCommitMessage("feat: helper", "test-model", AGENT), /AI-Model: test-model\n$/);
-  assert.throws(() => buildCommitMessage("feat: helper"), /verified App slug/);
+test("CLI builds canonical trailers only with an actual model id", () => {
+  assert.equal(buildCommitMessage("feat: helper", "gpt-5", AGENT), `feat: helper\n\nAI-Agent: ${AGENT}\nAI-Model: gpt-5\n`);
+  assert.throws(() => buildCommitMessage("feat: helper", undefined, AGENT), /actual single-line model id/);
+  assert.throws(() => buildCommitMessage("feat: helper", "UNKNOWN", AGENT), /actual single-line model id/);
+  assert.throws(() => buildCommitMessage("feat: helper", "n/a", AGENT), /actual single-line model id/);
+  assert.throws(() => buildCommitMessage("feat: helper", "\u2028gpt-5", AGENT), /actual single-line model id/);
+  assert.throws(() => buildCommitMessage("feat: helper", "gpt-5"), /verified App slug/);
   assert.deepEqual(parseArgs(["--message", "feat: helper", "--model", "test-model", "--files", "README.md"]), {
     message: "feat: helper", model: "test-model", files: ["README.md"],
   });
+  assert.equal(parseArgs(["--message", "feat: helper"], { AI_MODEL: "env-model" }).model, "env-model");
+  assert.equal(parseArgs(["--message", "feat: helper", "--model", "gpt-5"], { AI_MODEL: "env-model" }).model, "gpt-5");
   assert.throws(() => parseArgs(["--message", "feat: helper", "--files"]), /--files must be last/);
   assert.throws(() => parseArgs([]), /--message/);
+  assert.throws(() => parseArgs(["--message", "feat: helper"]), /model id/);
+  assert.throws(() => parseArgs(["--message", "feat: helper"], { AI_MODEL: " " }), /model id/);
+  assert.throws(() => parseArgs(["--message", "feat: helper", "--model", "unknown"], { AI_MODEL: "env-model" }), /model id/);
   assert.throws(() => buildCommitMessage("feat: helper", "unknown\nAI-Agent: someone-else"), /single-line/);
 });
 
-test("publication commits both bot identities, pushes without token arguments, and creates a draft PR", async () => {
+test("--model gpt-5 commits both bot identities, pushes without token arguments, and creates a draft PR", async () => {
   const mock = mockPublication();
   const output = [];
-  const status = await main(["--message", "feat: helper", "--model", "test-model"], {
+  const status = await main(["--message", "feat: helper", "--model", "gpt-5"], {
     ...mock.dependencies,
     stdout: { write: (text) => output.push(text) },
     stderr: { write: (text) => output.push(text) },
@@ -198,7 +210,8 @@ test("publication commits both bot identities, pushes without token arguments, a
   assert.equal(commit.env.GIT_COMMITTER_NAME, BOT_NAME);
   assert.equal(commit.env.GIT_AUTHOR_EMAIL, BOT_EMAIL);
   assert.equal(commit.env.GIT_COMMITTER_EMAIL, BOT_EMAIL);
-  assert.equal(commit.input, buildCommitMessage("feat: helper", "test-model", AGENT));
+  assert.equal(commit.input, buildCommitMessage("feat: helper", "gpt-5", AGENT));
+  assert.match(commit.input, /\nAI-Model: gpt-5\n$/);
   const identityRequest = mock.requests.find((call) => call.url.includes("/users/"));
   assert.equal(identityRequest.url, `https://api.github.com/users/${encodeURIComponent(BOT_NAME)}`);
   assert.equal(identityRequest.headers.Authorization, `Bearer ${access.token}`);
@@ -289,7 +302,7 @@ test("AI-Run missing slots use sentinels and invalid effort fails before authent
   const partial = mockPublication();
   partial.dependencies.env.AI_PROVIDER = "local";
   await publishAgentPr({ message: "feat: helper" }, partial.dependencies);
-  assert.equal(parseTrailers(partial.commands.find((call) => call.args.includes("commit")).input)["AI-Run"], "1|local|unknown@unknown|-|-/-|-|-|-");
+  assert.equal(parseTrailers(partial.commands.find((call) => call.args.includes("commit")).input)["AI-Run"], "1|local|test-model@unknown|-|-/-|-|-|-");
   const invalid = mockPublication();
   Object.assign(invalid.dependencies.env, runEnvironment, { AI_EFFORT: "secret-invalid-effort" });
   await assert.rejects(publishAgentPr({ message: "feat: helper" }, invalid.dependencies), { message: "Invalid AI-Run effort; see docs/METRICS.md." });
@@ -369,8 +382,8 @@ test("workflow files in the index or explicit paths require human publication be
 });
 
 test("--merge-when-green is opt-in and requires the merger role even if coder.merge is granted", async () => {
-  assert.equal(parseArgs(["--message", "feat: helper", "--merge-when-green"]).mergeWhenGreen, true);
-  assert.equal(parseArgs(["--message", "feat: helper"]).mergeWhenGreen, undefined);
+  assert.equal(parseArgs(["--message", "feat: helper", "--model", "test-model", "--merge-when-green"]).mergeWhenGreen, true);
+  assert.equal(parseArgs(["--message", "feat: helper", "--model", "test-model"]).mergeWhenGreen, undefined);
   for (const source of [policySource, policySource.replace("comment, label", "comment, label, merge")]) {
     const mock = mockPublication();
     mock.dependencies.loadPolicy = () => parseAgentPolicy(source);
@@ -447,7 +460,7 @@ test("--merge-when-green merges a ready or draft PR by exact SHA and only then d
     assert.equal(result.mergeCommit, "b".repeat(40));
     const merge = mock.requests.find((call) => call.url.endsWith("/pulls/7/merge"));
     assert.equal(merge.method, "PUT");
-    assert.deepEqual(JSON.parse(merge.body), { sha: commitSha, merge_method: "merge", commit_message: buildCommitMessage("feat: helper", undefined, AGENT) });
+    assert.deepEqual(JSON.parse(merge.body), { sha: commitSha, merge_method: "merge", commit_message: buildCommitMessage("feat: helper", "test-model", AGENT) });
     const tokenRequest = mock.requests.find((call) => call.url.endsWith("/access_tokens"));
     assert.deepEqual(JSON.parse(tokenRequest.body).permissions, { contents: "write", pull_requests: "write", checks: "read" });
     const deletion = mock.requests.find((call) => call.url.includes("/git/refs/heads/"));
@@ -864,6 +877,32 @@ test("help needs no environment or key and does not publish", async () => {
   assert.match(output.join(""), /GITHUB_APP_PRIVATE_KEY_PATH/);
   assert.match(output.join(""), /--files/);
   assert.match(output.join(""), /merger\.merge/);
+  assert.match(output.join(""), /actual model id \(not unknown\)/);
+  assert.match(output.join(""), /exits 2 before publication/);
+});
+
+test("missing or placeholder model exits two before key access, Git, or GitHub", async () => {
+  for (const [args, aiModel] of [
+    [["--message", "feat: helper"], ""],
+    [["--message", "feat: helper"], "unknown"],
+    [["--message", "feat: helper", "--model", ""], "env-model"],
+    [["--message", "feat: helper", "--model", "unknown"], "env-model"],
+  ]) {
+    const mock = mockPublication();
+    mock.dependencies.env.AI_MODEL = aiModel;
+    const errors = [];
+    const status = await main(args, { ...mock.dependencies, stderr: { write: (text) => errors.push(text) } });
+    assert.equal(status, 2);
+    assert.match(errors.join(""), /actual single-line model id/);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.commands.length, 0);
+    assert.equal(mock.requests.length, 0);
+  }
+  const missing = mockPublication();
+  await assert.rejects(publishAgentPrRaw({ message: "feat: helper" }, missing.dependencies), /actual single-line model id/);
+  assert.equal(missing.keyReads(), 0);
+  assert.equal(missing.commands.length, 0);
+  assert.equal(missing.requests.length, 0);
 });
 
 test("missing environment and an empty index fail before key access or network calls", async () => {
@@ -986,7 +1025,7 @@ test("local Git integration commits selected and staged files with bot provenanc
   assert.equal(first.createdPullRequest, true);
   assert.equal(localGit(["ls-tree", "-r", "--name-only", "HEAD"]).trim(), "agent-policy.yml\nselected.txt");
   assert.equal(localGit(["log", "-1", "--format=%an%n%ae%n%cn%n%ce"]).trim(), [BOT_NAME, BOT_EMAIL, BOT_NAME, BOT_EMAIL].join("\n"));
-  assert.ok(localGit(["log", "-1", "--format=%B"]).includes(`AI-Agent: ${AGENT}\nAI-Model: unknown`));
+  assert.ok(localGit(["log", "-1", "--format=%B"]).includes(`AI-Agent: ${AGENT}\nAI-Model: test-model`));
   writeFileSync(join(directory, "selected.txt"), "updated contents\n");
   localGit(["add", "--", "selected.txt"]);
   const second = await publishAgentPr({ message: "fix: staged file", model: "test-model" }, dependencies);

@@ -49,8 +49,11 @@ test("omits AI-Run without environment input or without any provider or model", 
 });
 
 test("partial environment uses missing-slot sentinels rather than inventing metadata", () => {
-  assert.equal(packAgentRun({ AI_PROVIDER: "local" }), "1|local|unknown@unknown|-|-/-|-|-|-");
+  assert.throws(() => packAgentRun({ AI_PROVIDER: "local" }), /Invalid AI-Run model/);
+  assert.equal(packAgentRun({ AI_PROVIDER: "local" }, "gpt-5"), "1|local|gpt-5@unknown|-|-/-|-|-|-");
   assert.equal(packAgentRun({ AI_MODEL: "known-model" }), "1|-|known-model@unknown|-|-/-|-|-|-");
+  assert.throws(() => packAgentRun({ AI_MODEL: "unknown" }), /Invalid AI-Run model/);
+  assert.throws(() => packAgentRun({ AI_MODEL: "gpt-5\n" }), /Invalid AI-Run model/);
   assert.equal(packAgentRun({ AI_EFFORT: "low" }, "cli-model"), "1|-|cli-model@unknown|l|-/-|-|-|-");
   assert.deepEqual(parseAgentRun("1|-|known-model@unknown|-|-/-|-|-|-"), {
     model: "known-model", schema: 1, provider: null, model_version: "unknown", effort: null,

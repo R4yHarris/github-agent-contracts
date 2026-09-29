@@ -1,6 +1,6 @@
 # Compact agent-run metadata
 
-v0.2.0 adds one optional `AI-Run` trailer. The required `AI-Agent` and `AI-Model` trailers are unchanged. Run metadata is harness-supplied provenance, not proof of authorship, an analytics service, or a quality score. Do not put prompts, traces, credentials, or free-form notes in git.
+v0.2.0 adds one optional `AI-Run` trailer. `AI-Agent` and `AI-Model` remain required; `AI-Model` must identify the actual model, not `unknown`. Run metadata is harness-supplied provenance, not proof of authorship, an analytics service, or a quality score. Do not put prompts, traces, credentials, or free-form notes in git.
 
 ## Schema 1
 
@@ -27,9 +27,9 @@ AI-Run: 1|anthropic|claude-sonnet-4.5@20250901|h|18234/200000|2510|ses_01K8|feat
 | 7: session | Opaque `[A-Za-z0-9._-]{1,64}` identifier |
 | 8: task | Opaque `[A-Za-z0-9._-]{1,64}` identifier |
 
-Use `-` as the missing-value sentinel for provider, effort, counts, session, and task. It is not another provider or effort level. A missing version is `unknown`, giving `<model>@unknown`. The required `AI-Model` retains its existing `unknown` fallback; when only a provider is supplied, column 3 is `unknown@unknown`.
+Use `-` as the missing-value sentinel for provider, effort, counts, session, and task. It is not another provider or effort level. A missing version is `unknown`, giving `<model>@unknown`. A missing model is not a metadata slot: the publisher refuses to create an agent commit without the actual model id.
 
-Keep all eight columns, with no spaces around `|`. Model names are single-line tokens; they may include a provider path such as `owner/model`, but cannot contain whitespace, `|`, `@`, or backticks. No field supplied by the harness may contain a pipe. Session and task identifiers must not contain personal data or secrets.
+Keep all eight columns, with no spaces around `|`. Model ids are single-line tokens starting with a letter or digit and may contain letters, digits, `.`, `_`, `-`, `:`, `/`, or `+`, including a provider path such as `owner/model`. Placeholders and whitespace, `|`, `@`, or backticks are invalid. No field supplied by the harness may contain a pipe. Session and task identifiers must not contain personal data or secrets.
 
 Parsers ignore extra trailing `|fields` for forward compatibility. Unknown unrelated trailer keys are ignored. When a schema-bearing `AI-Run` is present, invalid columns 1-8 cause a parse error; unsupported schemas are errors too. An absent or empty `AI-Run` has no schema and produces no record. Extra fields do not rescue invalid known columns. There is no `AI-X-*` family or additional YAML document.
 
@@ -40,7 +40,7 @@ Export only values actually reported by the harness before invoking [agent-pr.mj
 | Environment variable | Stored value | When missing |
 | --- | --- | --- |
 | `AI_PROVIDER` | Provider from the allowed list | `-` |
-| `AI_MODEL` | Required `AI-Model` and model part of column 3 | `unknown` in the required trailer |
+| `AI_MODEL` | Required `AI-Model` and model part of column 3 | Supply `--model` or publishing exits `2` |
 | `AI_MODEL_VERSION` | Version token in column 3 | `unknown` |
 | `AI_EFFORT` | `low`/`l` -> `l`, `medium`/`m` -> `m`, `high`/`h` -> `h`, `max`/`x` -> `x` | `-` |
 | `AI_CONTEXT_USED` | `in` | `-` |
@@ -49,9 +49,9 @@ Export only values actually reported by the harness before invoking [agent-pr.mj
 | `AI_SESSION` | Session identifier | `-` |
 | `AI_TASK` | Task identifier | `-` |
 
-`--model` takes precedence over `AI_MODEL`; both the required trailer and `AI-Run` use the selected model. If all nine variables are unset or empty, no `AI-Run` is written, even with `--model`. `AI_MODEL` alone counts as environment input. If some variables are supplied, keep the trailer with missing-slot sentinels unless both provider and the explicitly supplied model are empty. Do not invent identity information just to emit a record. Malformed supplied values, including an unknown effort, are rejected before key access or GitHub requests.
+`--model` takes precedence over `AI_MODEL`; both the required trailer and `AI-Run` use the selected model. The publisher exits `2` if neither supplies a valid model id; it never invents one. If all nine variables are unset or empty, no `AI-Run` is written, even with `--model`. `AI_MODEL` alone counts as environment input. With run input and a known model, missing slots use sentinels. Do not invent identity information just to emit a record. Malformed supplied values, including an unknown effort, are rejected before key access or GitHub requests.
 
-For example, provider-only input `AI_PROVIDER=local` produces `1|local|unknown@unknown|-|-/-|-|-|-`. Model-only input `AI_MODEL=known-model` produces `1|-|known-model@unknown|-|-/-|-|-|-`. Counts of zero stay `0`, not `-`.
+For example, `AI_PROVIDER=local` with `--model gpt-5` produces `1|local|gpt-5@unknown|-|-/-|-|-|-`. Model-only input `AI_MODEL=known-model` produces `1|-|known-model@unknown|-|-/-|-|-|-`. Counts of zero stay `0`, not `-`. The `unknown` suffix is a missing model **version**, not a missing model id.
 
 ## PR body
 

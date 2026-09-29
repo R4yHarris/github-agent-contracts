@@ -32,7 +32,7 @@ Required trailers when a commit is classified as agent-authored:
 
 ```
 AI-Agent: <name>
-AI-Model: <model or "unknown">
+AI-Model: <actual model id; do not invent or use "unknown">
 ```
 
 Recommended:

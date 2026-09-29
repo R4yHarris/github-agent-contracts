@@ -50,7 +50,7 @@ node scripts/load-agent-policy.mjs --role coder --capability open_pr
 - Only use `--merge-when-green` when the human also authorizes merging and remote feature-branch deletion. A human must first add `merge` to `roles.merger.allow` in root `agent-policy.yml` and publish that grant on the default branch. Never edit the policy yourself or treat the flag as a grant. Keep the flag disabled on coder-only WSL; a trusted launcher/operator must use a separately approved merger App/context for merging.
 - The human supplies `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` through the environment. Never read the PEM into chat, paste key material, print tokens, or commit `.env` or private-key files. The script does not load `.env` automatically.
 - Default onboarding is a user/org-owned App from `docs/app-manifest.json`; follow `docs/ONBOARDING.md` and `docs/THREAT_MODEL.md`. Never recommend the maintainer's `r4yharris-agent-coder` App for private or production repositories; a demo install is for public playgrounds only.
-- The helper verifies origin's installation against `GITHUB_APP_ID`, resolves that App's bot account, sets both author and committer to it, and adds `AI-Agent: <app-slug>` plus `AI-Model: unknown`. Do not hard-code or invent a bot identity; use `--model` when the model is known.
+- The helper verifies origin's installation against `GITHUB_APP_ID`, resolves that App's bot account, sets both author and committer to it, and adds `AI-Agent: <app-slug>` plus the actual `AI-Model` id from `--model` or `AI_MODEL`. Neither has an `unknown` fallback; if the model is unavailable, stop without publishing. Do not hard-code or invent a bot identity or model.
 - Without `--files`, it commits the reviewed staged changes. With `--files`, pass individual repository files last; unrelated staged files cause a failure. Staged or selected `.github/workflows/**` paths are refused before token minting; a human must publish workflow changes. Inspect the changes and run the tests before publication.
 - Node 20+, Git, and `gh` are required. The App must be installed on origin's repository with contents and pull requests write permissions; the opt-in merge flow also needs Checks read permission. The helper creates a repository-scoped installation token, pushes without force, creates a draft PR only if no open PR exists, and revokes the token.
 - This is the explicitly authorized branch-publication path, not a general grant of GitHub write permissions. It refuses main, master, and the repository's default branch. Never bypass repository protections.
@@ -59,7 +59,7 @@ node scripts/load-agent-policy.mjs --role coder --capability open_pr
 - Commits are unsigned for now. If signing is required or any step fails, stop and report it without a raw Git fallback. A human may commit a bootstrap slice themselves; agents may not assume that identity. After a partial failure, inspect the existing commit and PR before retrying.
 
 ```bash
-node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model unknown --files README.md
+node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model gpt-5 --files README.md
 ```
 
 ## Optional run metadata

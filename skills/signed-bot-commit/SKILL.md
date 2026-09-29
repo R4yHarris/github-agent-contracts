@@ -27,10 +27,10 @@ Pass a commit message without inventing credentials or manually changing Git's g
 
 ```text
 AI-Agent: <your-app-slug>
-AI-Model: unknown
+AI-Model: gpt-5
 ```
 
-Use `AI_MODEL` or `--model` to replace `unknown` when the actual model is known; the flag takes precedence. Harnesses SHOULD supply known `AI_*` run values from [METRICS.md](../../docs/METRICS.md) before invoking the helper. It adds one optional `AI-Run` trailer and upserts the tagged PR pair, omitting run metadata when no environment input is supplied. Never invent missing counts or identifiers. Humans evaluate with separate `AI-Eval` comments; the helper must not generate them. It checks the committed author, committer, trailers, and protected file paths before pushing the verified commit.
+Supply the actual model id through `AI_MODEL` or `--model`; the flag takes precedence. `gpt-5` above is an example, not a default. Without a known model, or with a placeholder such as `unknown`, the CLI exits `2` without publishing. Never invent a model. Harnesses SHOULD supply known `AI_*` run values from [METRICS.md](../../docs/METRICS.md) before invoking the helper. It adds one optional `AI-Run` trailer and upserts the tagged PR pair, omitting run metadata when no environment input is supplied. Never invent missing counts or identifiers. Humans evaluate with separate `AI-Eval` comments; the helper must not generate them. It checks the committed author, committer, trailers, and protected file paths before pushing the verified commit.
 
 ## Usage
 
@@ -39,13 +39,13 @@ The human must first publish root `agent-policy.yml` on the default branch and i
 With reviewed changes already staged:
 
 ```bash
-node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model unknown
+node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model gpt-5
 ```
 
 To stage and commit named files, put `--files` last:
 
 ```bash
-node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --files README.md AGENTS.md
+node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model gpt-5 --files README.md AGENTS.md
 ```
 
 `--help` does not read policy, the key, or contact GitHub. Normal invocation first requires the local coder grants, then signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. Only the merge flag adds Checks read to the token request. After checking the approved policy and branch protections, it makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
@@ -58,7 +58,7 @@ The configured App also needs Checks read-only permission, and the repository mu
 
 ```bash
 node scripts/load-agent-policy.mjs --role merger --capability merge
-node scripts/agent-pr.mjs --message "fix: validate input" --merge-when-green --files README.md
+node scripts/agent-pr.mjs --message "fix: validate input" --model gpt-5 --merge-when-green --files README.md
 ```
 
 The helper waits for `check-agent-trailers` from GitHub Actions to succeed on the exact published PR head SHA. It may mark a green draft ready, then rechecks head, checks, and mergeability. It never self-approves; required reviews and repository rules still apply. Polling is bounded to approximately ten minutes; failed checks, changed SHAs, policy revocation, and API errors stop the flow.
