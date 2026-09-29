@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { checkMessage } from "./check-agent-trailers.mjs";
+import { checkMessage, trailerError } from "./check-agent-trailers.mjs";
 
 function git(args, cwd) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -44,7 +44,7 @@ function main() {
       requireAll: requireAll === "true",
     });
     for (const result of results) {
-      const status = result.ok ? "OK" : `missing trailers: ${result.missing.join(", ")}`;
+      const status = result.ok ? "OK" : trailerError(result);
       process.stdout.write(`${result.sha}: ${status}\n`);
     }
     process.exitCode = results.every((result) => result.ok) ? 0 : 1;

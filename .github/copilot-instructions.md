@@ -15,7 +15,7 @@ This workspace is **github-agent-contracts** only.
 - After reviewing/staging files, passing tests and policy gates, invoke the helper as the final step only after authorization for commit, push, and a draft PR. A request to stop after writing files and testing means no publication. Missing App configuration means leave changes uncommitted after tests. Humans may perform their own bootstrap commits.
 - The human supplies `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` in the environment. Do not read the PEM into chat, print tokens, or stage/commit `.env` or key files; the helper does not load `.env`.
 - Use the consuming user/org's own App through `docs/ONBOARDING.md` and `docs/app-manifest.json`; do not recommend the maintainer demo App for private or production repositories.
-- The helper discovers the configured App's verified bot identity for author and committer and uses its slug in `AI-Agent`. `--model` defaults to `unknown`; `--files` must be last. Without it, only reviewed staged changes are committed.
+- The helper discovers the configured App's verified bot identity for author and committer and uses its slug in `AI-Agent`. Supply the actual model id through `--model` or `AI_MODEL`; there is no `unknown` fallback, and agents must not invent one. `--files` must be last. Without it, only reviewed staged changes are committed.
 - Run tests first. On a missing prerequisite or failed publication, stop rather than falling back to raw Git; a partial failure can leave a valid local commit. Commits are unsigned, so do not invoke the helper when signing is required.
 - Keep examples scoped: GitHub App installation tokens, MCP tool allowlists, `permissions: read-all` plus explicit safe-outputs.
 
@@ -24,5 +24,5 @@ Authorized publication example:
 ```bash
 node scripts/load-agent-policy.mjs --role coder --capability commit_branch
 node scripts/load-agent-policy.mjs --role coder --capability open_pr
-node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model unknown --files README.md
+node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model gpt-5 --files README.md
 ```

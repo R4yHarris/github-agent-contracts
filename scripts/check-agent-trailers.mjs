@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseAgentRun, parseTrailers } from "./parse-agent-run.mjs";
+import { isModelId, parseAgentRun, parseTrailers } from "./parse-agent-run.mjs";
 
 export { parseTrailers } from "./parse-agent-run.mjs";
 
@@ -28,8 +28,9 @@ function usage(stream = process.stdout) {
   --json               Print the result as JSON
   --help, -h           Show this help
 
+  AI-Model must name the actual model id, not unknown, on agent commits.
   Exit 0  OK
-  Exit 1  missing required trailers on an agent-authored message
+  Exit 1  missing or invalid required trailers on an agent-authored message
   Exit 2  usage error
 `);
 }
@@ -76,7 +77,7 @@ export function checkMessage(message, requireAll = false, authorEmail = "", requ
   const missing = [];
   if (agent) {
     for (const key of REQUIRED) {
-      if (!trailers[key] || String(trailers[key]).trim() === "") missing.push(key);
+      if (!trailers[key] || (key === "AI-Model" && !isModelId(trailers[key]))) missing.push(key);
     }
     if (requireRun) {
       try {
@@ -92,6 +93,12 @@ export function checkMessage(message, requireAll = false, authorEmail = "", requ
     missing,
     ok: missing.length === 0,
   };
+}
+
+export function trailerError(result) {
+  const invalid = result.missing.includes("AI-Run") ||
+    (result.missing.includes("AI-Model") && result.trailers["AI-Model"]);
+  return `${invalid ? "missing or invalid trailers" : "missing trailers"}: ${result.missing.join(", ")}`;
 }
 
 function main(argv) {
@@ -115,8 +122,7 @@ function main(argv) {
   if (args.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else if (!result.ok) {
-    const reason = result.missing.includes("AI-Run") ? "missing or invalid trailers" : "missing trailers";
-    process.stderr.write(`${reason}: ${result.missing.join(", ")}\n`);
+    process.stderr.write(`${trailerError(result)}\n`);
   }
   process.exit(result.ok ? 0 : 1);
 }

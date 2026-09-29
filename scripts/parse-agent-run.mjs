@@ -13,6 +13,13 @@ const ENV_KEYS = [
 
 export class AgentRunError extends Error {}
 
+export function isModelId(value) {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._:+\/-]*$/.test(value) &&
+    !/\s/.test(value) &&
+    !/^(unknown|none|n\/a|unspecified)$/i.test(value);
+}
+
 export function parseTrailers(message) {
   const normalized = String(message).replace(/\r\n/g, "\n").trimEnd();
   const trailers = {};
@@ -82,19 +89,19 @@ export function packAgentRun(env = {}, model = env.AI_MODEL ?? "") {
   const effort = values.AI_EFFORT || "-";
   if (!Object.hasOwn(EFFORTS, effort)) invalid("effort");
   if (!values.AI_PROVIDER && !model) return null;
-  if (typeof model !== "string" || model.includes("|") || ENV_KEYS.some((key) => values[key].includes("|"))) invalid("field separator");
-  const resolvedModel = model || "unknown";
+  if (!isModelId(model)) invalid("model");
+  if (ENV_KEYS.some((key) => values[key].includes("|"))) invalid("field separator");
   const packed = [
     "1",
     values.AI_PROVIDER || "-",
-    `${resolvedModel}@${values.AI_MODEL_VERSION || "unknown"}`,
+    `${model}@${values.AI_MODEL_VERSION || "unknown"}`,
     EFFORTS[effort],
     `${values.AI_CONTEXT_USED || "-"}/${values.AI_CONTEXT_MAX || "-"}`,
     values.AI_CONTEXT_OUT || "-",
     values.AI_SESSION || "-",
     values.AI_TASK || "-",
   ].join("|");
-  parseAgentRun(packed, resolvedModel);
+  parseAgentRun(packed, model);
   return packed;
 }
 

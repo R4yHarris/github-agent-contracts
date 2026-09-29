@@ -31,7 +31,7 @@ This is **not a git host, not `copilot[bot]`, not a personal access token (PAT),
 
 The control is **required PR check + protected branch + bot author + trailers**. The App authenticates GitHub operations. App permissions, branch protection/environments, and the policy must all allow an action; installing an App or adding a prompt does not replace these gates.
 
-The [publisher](scripts/agent-pr.mjs) discovers the configured App's bot, sets both author and committer, appends `AI-Agent` and `AI-Model`, pushes an authorized feature branch, and creates a draft PR if none exists. It uses `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the environment, not a signed-in human's credentials. Missing configuration or denied policy means stop with changes uncommitted.
+The [publisher](scripts/agent-pr.mjs) discovers the configured App's bot, sets both author and committer, appends `AI-Agent` and the actual `AI-Model` id, pushes an authorized feature branch, and creates a draft PR if none exists. Supply the model through `--model` or `AI_MODEL`; missing or placeholder values stop publication rather than inventing a model. It uses `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the environment, not a signed-in human's credentials. Missing configuration or denied policy means stop with changes uncommitted.
 
 Humans own policy and workflow changes. Agents cannot grant themselves capabilities or publish `.github/workflows/**` through this helper. Never force-push, push main directly, squash, or self-approve. Deploy and direct protected-push implementations are out of scope.
 
@@ -68,16 +68,16 @@ An agent commit has a blank-separated footer:
 
 ```text
 AI-Agent: your-app-slug
-AI-Model: unknown
+AI-Model: gpt-5
 ```
 
-The check inspects messages containing `AI-Agent:` and GitHub noreply bot authors by default. Unmarked human commits pass. `--require`, or the Action's `require-on-all-commits: "true"`, requires trailers on every commit. See the [trailer specification](docs/commit-trailers.md) for parsing, exit codes, and limits.
+`gpt-5` is an example; use the actual model id for each run. The check inspects messages containing `AI-Agent:` and GitHub noreply bot authors by default, and rejects missing or placeholder models. Unmarked human commits pass. `--require`, or the Action's `require-on-all-commits: "true"`, requires trailers on every commit. See the [trailer specification](docs/commit-trailers.md) for parsing, exit codes, and limits.
 
 The [PR workflow](.github/workflows/check-agent-trailers.yml) uses the trusted base revision's checker with full history and read-only permissions. Bootstrap the Action and scripts before enabling the local workflow. Humans must configure required checks, reviews, and branch protection; the script does not configure them.
 
 ## Optional run metadata (v0.2.0)
 
-Harnesses can supply compact run information through the documented `AI_*` environment variables. The publisher adds one optional `AI-Run` trailer and upserts a tagged PR body pair; with no supplied metadata, publishing and the default two-trailer check remain unchanged. `--require-run` opts into validation. [METRICS.md](docs/METRICS.md) specifies the format, human-only `AI-Eval` comments, and local JSONL export with [export-agent-metrics.mjs](scripts/export-agent-metrics.mjs). No analytics service, prompts, traces, or generated quality scores are added.
+Harnesses can supply compact run information through the documented `AI_*` environment variables. The publisher adds one optional `AI-Run` trailer and upserts a tagged PR body pair; with no supplied optional metadata (but with the required model id), publishing and the default two-trailer check remain unchanged. `--require-run` opts into validation. [METRICS.md](docs/METRICS.md) specifies the format, human-only `AI-Eval` comments, and local JSONL export with [export-agent-metrics.mjs](scripts/export-agent-metrics.mjs). No analytics service, prompts, traces, or generated quality scores are added.
 
 ## With gh-aw
 

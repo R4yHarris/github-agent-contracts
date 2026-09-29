@@ -63,7 +63,7 @@ Agent-classified commits need a blank-separated footer such as:
 feat: add input validation
 
 AI-Agent: copilot-coding-agent
-AI-Model: unknown
+AI-Model: gpt-5
 ```
 
 To require trailers on human commits too, set this input in the Action step's `with:` block:
@@ -72,7 +72,7 @@ To require trailers on human commits too, set this input in the Action step's `w
 require-on-all-commits: "true"
 ```
 
-The default is `"false"`. Missing required trailers fail the check, as do invalid commit ranges or incomplete history. Trailers and author emails are provenance claims, not proof of identity or authorization to write to GitHub.
+The default is `"false"`. Missing required trailers and placeholder models fail the check, as do invalid commit ranges or incomplete history. `gpt-5` above is an example; use the model id actually reported by the harness. Trailers and author emails are provenance claims, not proof of identity or authorization to write to GitHub.
 
 Before requiring the check, verify a PR with valid trailers passes and a marked agent commit missing `AI-Model` fails. In the default mode, an unmarked human commit should pass; in require-all mode, it should fail. Every commit in the PR must satisfy the selected policy, not just the latest commit.
 

@@ -56,21 +56,23 @@ test("PR checker scans every commit and distinguishes human, agent, and bot auth
   const history = createHistory(context);
   const human = history.commit("fix typo\n", "123+human@users.noreply.github.com");
   const invalidAgent = history.commit("feat: x\n\nAI-Agent: copilot\n");
-  const validAgent = history.commit("feat: y\n\nAI-Agent: copilot\nAI-Model: unknown\n");
-  const invalidBot = history.commit("fix: z\n\nAI-Model: unknown\n", "123+agent[bot]@users.noreply.github.com");
+  const invalidModel = history.commit("feat: x\n\nAI-Agent: copilot\nAI-Model: unknown\n");
+  const validAgent = history.commit("feat: y\n\nAI-Agent: copilot\nAI-Model: gpt-5\n");
+  const invalidBot = history.commit("fix: z\n\nAI-Model: gpt-5\n", "123+agent[bot]@users.noreply.github.com");
   const validBot = history.commit(
-    "fix: done\n\nAI-Agent: coder\nAI-Model: unknown\n",
+    "fix: done\n\nAI-Agent: coder\nAI-Model: gpt-5\n",
     "123+agent[bot]@users.noreply.github.com",
   );
   const results = checkPullRequest({ ...history, headSha: validBot });
-  assert.deepEqual(results.map((result) => result.sha), [human, invalidAgent, validAgent, invalidBot, validBot]);
-  assert.deepEqual(results.map((result) => result.agentAuthored), [false, true, true, true, true]);
-  assert.deepEqual(results.map((result) => result.missing), [[], ["AI-Model"], [], ["AI-Agent"], []]);
+  assert.deepEqual(results.map((result) => result.sha), [human, invalidAgent, invalidModel, validAgent, invalidBot, validBot]);
+  assert.deepEqual(results.map((result) => result.agentAuthored), [false, true, true, true, true, true]);
+  assert.deepEqual(results.map((result) => result.missing), [[], ["AI-Model"], ["AI-Model"], [], ["AI-Agent"], []]);
 
   const result = runPullRequest(history.cwd, history.baseSha, validBot);
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(result.stdout.trim().split("\n").length, 5);
+  assert.equal(result.stdout.trim().split("\n").length, 6);
   assert.ok(result.stdout.includes(`${invalidAgent}: missing trailers: AI-Model`));
+  assert.ok(result.stdout.includes(`${invalidModel}: missing or invalid trailers: AI-Model`));
   assert.ok(result.stdout.includes(`${invalidBot}: missing trailers: AI-Agent`));
   assert.ok(result.stdout.includes(`${validBot}: OK`));
 });

@@ -10,7 +10,7 @@ AI-Model: gpt-4.1
 ```
 
 `AI-Agent` is a stable role name (`copilot-coding-agent`, `hermes-coder`, `codex-cli`).  
-`AI-Model` may be `unknown` if the harness does not expose it.
+`AI-Model` must contain the actual model id reported by the harness. It must start with a letter or digit and contain only letters, digits, `.`, `_`, `-`, `:`, `/`, or `+`; placeholders such as `unknown`, `none`, `n/a`, and `unspecified` are invalid. If the model is not known, do not invent one or publish an agent commit. The publisher requires `--model` or `AI_MODEL` and exits `2` before publication when neither supplies a valid model. `--model` takes precedence over `AI_MODEL`; neither has an `unknown` fallback.
 
 ## Optional compact run metadata
 
@@ -43,7 +43,7 @@ feat: add health endpoint
 Return 200 and uptime JSON from GET /health.
 
 AI-Agent: hermes-coder
-AI-Model: unknown
+AI-Model: claude-sonnet-4.5
 AI-Session: sess_01
 Co-authored-by: Jane Doe <jane@users.noreply.github.com>
 ```
@@ -58,7 +58,7 @@ Co-authored-by: Jane Doe <jane@users.noreply.github.com>
 
 For example, `123+coder[bot]@users.noreply.github.com` is a bot address; `123+human@users.noreply.github.com` is not. The PR Action supplies each commit's author email automatically. Local message-only checks cannot infer the author.
 
-Required values must be nonempty and use the exact keys `AI-Agent` and `AI-Model`. The checker parses the final contiguous block of `Key: value` lines, separated from the subject or body by a blank line. A marker in the subject or body triggers checking but does not count as a valid trailer. CRLF and trailing blank lines are supported; the last occurrence of a repeated key wins.
+Required values must be nonempty and use the exact keys `AI-Agent` and `AI-Model`; an invalid model id fails the check even when the trailer is present. The checker parses the final contiguous block of `Key: value` lines, separated from the subject or body by a blank line. A marker in the subject or body triggers checking but does not count as a valid trailer. CRLF and trailing blank lines are supported; the last occurrence of a repeated key wins.
 
 ## Local use
 
@@ -72,7 +72,7 @@ node scripts/check-agent-trailers.mjs --require --message "fix typo"
 node scripts/check-agent-trailers.mjs --require-run --message-file path/to/message.txt
 ```
 
-Choose exactly one of `--message` or `--message-file`. Exit codes are `0` for a passing check, `1` for missing required trailers or invalid required run metadata, and `2` for invalid arguments or an unreadable message file. `--json` reports `agentAuthored`, `trailers`, `missing`, and `ok` for a completed check. With `--require-run`, `missing` includes `AI-Run` when it is absent or malformed, including a model that differs from `AI-Model`. Without that flag, optional run data does not affect the check. Combine `--require` and `--require-run` to require it on every message.
+Choose exactly one of `--message` or `--message-file`. Exit codes are `0` for a passing check, `1` for missing or invalid required trailers (including a placeholder model) or invalid required run metadata, and `2` for invalid arguments or an unreadable message file. `--json` reports `agentAuthored`, `trailers`, `missing`, and `ok` for a completed check; `missing` includes `AI-Model` when its value is invalid. With `--require-run`, `missing` includes `AI-Run` when it is absent or malformed, including a model that differs from `AI-Model`. Without that flag, optional run data does not affect the check. Combine `--require` and `--require-run` to require it on every message.
 
 ## PR Action
 
@@ -95,4 +95,4 @@ The workflow fetches PR history, then checks out the base revision before runnin
 
 ## Limits
 
-Trailers and author emails are claims, not authentication or cryptographic signatures. An agent using an unmarked human identity is not detected by the default heuristic. Use require-all mode when every commit must declare provenance, and GitHub App permissions and repository rules for authorization.
+Trailers and author emails are claims, not authentication or cryptographic signatures. The checker validates the model-id format and rejects placeholders; it cannot prove which model actually ran. An agent using an unmarked human identity is not detected by the default heuristic. Use require-all mode when every commit must declare provenance, and GitHub App permissions and repository rules for authorization.

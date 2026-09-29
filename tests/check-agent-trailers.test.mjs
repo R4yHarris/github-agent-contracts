@@ -19,17 +19,18 @@ test("parses trailers after blank line", () => {
 body
 
 AI-Agent: hermes-coder
-AI-Model: unknown
+AI-Model: claude-sonnet-4.5
 `;
   const t = parseTrailers(msg);
   assert.equal(t["AI-Agent"], "hermes-coder");
-  assert.equal(t["AI-Model"], "unknown");
+  assert.equal(t["AI-Model"], "claude-sonnet-4.5");
 });
 
 test("valid agent message passes", () => {
-  const r = checkMessage(`feat: x\n\nAI-Agent: copilot\nAI-Model: gpt\n`);
+  const r = checkMessage(`feat: x\n\nAI-Agent: copilot\nAI-Model: gpt-5\n`);
   assert.equal(r.ok, true);
   assert.equal(r.agentAuthored, true);
+  assert.equal(checkMessage("feat: x\n\nAI-Agent: copilot\nAI-Model: owner/model:small\n").ok, true);
 });
 
 test("missing AI-Agent on unmarked human message passes", () => {
@@ -44,6 +45,16 @@ test("missing AI-Model on agent message fails", () => {
   assert.deepEqual(r.missing, ["AI-Model"]);
 });
 
+test("unknown and other placeholder model ids fail on agent commits", () => {
+  for (const model of ["unknown", "UNKNOWN", "none", "n/a", "unspecified", "-", "not a model", "gpt-5|other", "gpt-5@version"]) {
+    const message = `feat: x\n\nAI-Agent: copilot\nAI-Model: ${model}\n`;
+    assert.deepEqual(checkMessage(message).missing, ["AI-Model"], model);
+    const result = runChecker(["--message", message]);
+    assert.equal(result.status, 1, model);
+    assert.match(result.stderr, /missing or invalid trailers: AI-Model/, model);
+  }
+});
+
 test("--require treats human message as agent-authored", () => {
   const r = checkMessage(`fix typo\n`, true);
   assert.equal(r.agentAuthored, true);
@@ -52,7 +63,7 @@ test("--require treats human message as agent-authored", () => {
 });
 
 test("trailers need a blank separator", () => {
-  const message = "feat: x\nAI-Agent: copilot\nAI-Model: unknown\n";
+  const message = "feat: x\nAI-Agent: copilot\nAI-Model: gpt-5\n";
   assert.deepEqual(parseTrailers(message), {});
   assert.equal(checkMessage(message).ok, false);
 });
@@ -70,7 +81,7 @@ test("AI-Agent markers outside the footer still require trailers", () => {
 });
 
 test("--require rejects a footer with AI-Model but no AI-Agent", () => {
-  const result = checkMessage("feat: x\n\nAI-Model: unknown\n", true);
+  const result = checkMessage("feat: x\n\nAI-Model: gpt-5\n", true);
   assert.equal(result.ok, false);
   assert.deepEqual(result.missing, ["AI-Agent"]);
 });
@@ -102,7 +113,7 @@ test("human noreply addresses and lookalike domains are not bot authors", () => 
 
 test("valid bot-authored message passes", () => {
   const result = checkMessage(
-    "fix: x\n\nAI-Agent: copilot\nAI-Model: unknown\n",
+    "fix: x\n\nAI-Agent: copilot\nAI-Model: gpt-5\n",
     false,
     "123+agent[bot]@users.noreply.github.com",
   );
@@ -111,7 +122,7 @@ test("valid bot-authored message passes", () => {
 
 test("CRLF messages and recommended trailers are supported", () => {
   const result = checkMessage(
-    "fix: x\r\n\r\nAI-Agent: copilot\r\nAI-Model: unknown\r\n" +
+    "fix: x\r\n\r\nAI-Agent: copilot\r\nAI-Model: gpt-5\r\n" +
     "AI-Session: opaque-id\r\nCo-authored-by: Owner <owner@example.com>\r\n\r\n",
   );
   assert.equal(result.ok, true);
@@ -120,7 +131,7 @@ test("CRLF messages and recommended trailers are supported", () => {
 
 test("empty required trailer values fail", () => {
   for (const message of [
-    "fix: x\n\nAI-Agent: \nAI-Model: unknown\n",
+    "fix: x\n\nAI-Agent: \nAI-Model: gpt-5\n",
     "fix: x\n\nAI-Agent: copilot\nAI-Model: \n",
   ]) {
     assert.equal(checkMessage(message).ok, false);
@@ -129,7 +140,7 @@ test("empty required trailer values fail", () => {
 
 test("CLI returns JSON and exits zero for a valid message", () => {
   const result = runChecker([
-    "--json", "--message", "fix: x\n\nAI-Agent: copilot\nAI-Model: unknown\n",
+    "--json", "--message", "fix: x\n\nAI-Agent: copilot\nAI-Model: gpt-5\n",
   ]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).ok, true);
@@ -155,7 +166,7 @@ test("CLI reads a UTF-8 message file", (context) => {
   const directory = mkdtempSync(join(repository, ".trailer-test-"));
   context.after(() => rmSync(directory, { recursive: true, force: true }));
   const messageFile = join(directory, "commit message.txt");
-  writeFileSync(messageFile, "fix: x\n\nAI-Agent: copilot\nAI-Model: unknown\n");
+  writeFileSync(messageFile, "fix: x\n\nAI-Agent: copilot\nAI-Model: gpt-5\n");
   const result = runChecker(["--message-file", messageFile, "--json"]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).ok, true);
@@ -185,6 +196,7 @@ test("CLI --help documents flags and exits zero", () => {
   for (const flag of ["--help", "--message", "--message-file", "--author-email", "--require", "--require-run", "--json"]) {
     assert.ok(result.stdout.includes(flag), flag);
   }
+  assert.match(result.stdout, /AI-Model must name the actual model id, not unknown/);
 });
 
 test("default checks still require only AI-Agent and AI-Model", () => {
