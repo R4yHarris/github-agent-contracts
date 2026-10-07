@@ -10,7 +10,7 @@ Git author/committer fields that copy a human hide provenance. GitHub Apps creat
 
 Start with [ONBOARDING.md](ONBOARDING.md) and [app-manifest.json](app-manifest.json), using a unique account-specific name ending in `-agent-coder`. Register under the user or organization that owns the repositories. The template is private (`public: false`, Only on this account), with webhooks inactive, no events, and no user OAuth.
 
-The manifest requests repository permissions Metadata read, Checks read-only, and Contents, Issues, and Pull requests read-write for feature-branch publication, optional merge checks, and approved outputs. Omit Issues write when unused. It grants no Administration, Secrets, Workflows, Actions, or Deployments permissions. A human must accept the Checks permission change for an existing installation before using opt-in merge. Keep read-only agent/MCP tokens separate from publication credentials.
+The manifest requests repository permissions Metadata read, Checks read-only, Contents write, Issues write, and Pull requests write for feature-branch publication, optional merge checks, and approved outputs. For broader project and environment orchestration, it also includes Repository projects write, Organization projects write, Actions read, Deployments read, Environments read, and Variables read. The project permission keys are `repository_projects` and `organization_projects`, not `projects`. Keep each scope aligned to the exact task and remove unused permissions before installation; in particular, organization project access is installation-wide rather than limited by selected repositories. A human must accept permission changes for an existing installation before using them. Keep read-only agent/MCP tokens separate from publication credentials.
 
 Choose **Only select repositories** at installation. GitHub does not support a manifest field for that selection. Start with one repository and separate unrelated trust boundaries.
 
@@ -49,6 +49,8 @@ An approved publisher or credential service signs a short-lived App JWT, discove
 ```
 
 Installation tokens normally expire after one hour. Request a fresh token when needed, and revoke it when a session is finished if it is no longer needed. Do not reuse the App JWT as a repository token.
+
+Request only the permissions needed for the operation. The publisher keeps its core publication token narrow. An approved orchestration broker can use `mintInstallationToken` with `additionalPermissions` limited to Actions read, Deployments read, Environments read, Variables read, Issues read/write, and repository or organization Projects read/write. The helper rejects unknown permission names, access above those limits, and the invalid generic `projects` key.
 
 Inject the installation token through the environment of the local MCP server or an approved credential helper. The official local MCP server calls its token variable `GITHUB_PERSONAL_ACCESS_TOKEN`; in this pack its value must still be an **installation token**, not a PAT. Never echo it, store it in a remote URL, or persist it in config or a tracked file.
 
