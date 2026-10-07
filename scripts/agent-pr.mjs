@@ -66,8 +66,40 @@ async function githubRequest(path, token, { method = "GET", body, fetchImpl = gl
   }
 }
 
+const OPTIONAL_ORCHESTRATION_PERMISSIONS = new Map([
+  ["actions", new Set(["read"])],
+  ["deployments", new Set(["read"])],
+  ["environments", new Set(["read"])],
+  ["issues", new Set(["read", "write"])],
+  ["organization_projects", new Set(["read", "write"])],
+  ["repository_projects", new Set(["read", "write"])],
+  ["variables", new Set(["read"])],
+]);
+
+export function buildInstallationPermissions({ readChecks = false, additionalPermissions = {} } = {}) {
+  if (
+    additionalPermissions === null ||
+    typeof additionalPermissions !== "object" ||
+    Array.isArray(additionalPermissions)
+  ) {
+    throw new AgentPrError("Additional installation permissions must be an object.");
+  }
+  for (const [permission, access] of Object.entries(additionalPermissions)) {
+    if (!OPTIONAL_ORCHESTRATION_PERMISSIONS.get(permission)?.has(access)) {
+      throw new AgentPrError(`Unsupported additional installation permission: ${permission}.`);
+    }
+  }
+  const permissions = {
+    contents: "write",
+    pull_requests: "write",
+    ...additionalPermissions,
+  };
+  if (readChecks) permissions.checks = "read";
+  return permissions;
+}
+
 export async function mintInstallationToken(
-  { appId, privateKey, owner, repository, readChecks = false },
+  { appId, privateKey, owner, repository, readChecks = false, additionalPermissions = {} },
   { fetchImpl = globalThis.fetch, now = Date.now() } = {},
 ) {
   const jwt = createAppJwt(appId, privateKey, now);
@@ -81,8 +113,7 @@ export async function mintInstallationToken(
   ) {
     throw new AgentPrError("The repository needs an active installation matching GITHUB_APP_ID.");
   }
-  const permissions = { contents: "write", pull_requests: "write" };
-  if (readChecks) permissions.checks = "read";
+  const permissions = buildInstallationPermissions({ readChecks, additionalPermissions });
   const access = await githubRequest(`/app/installations/${installation.id}/access_tokens`, jwt, {
     method: "POST",
     body: { repositories: [repository], permissions },

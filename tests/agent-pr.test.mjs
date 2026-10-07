@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  buildCommitMessage, createAppJwt, main,
+  buildCommitMessage, buildInstallationPermissions, createAppJwt, main,
   mintInstallationToken, parseArgs, parseOrigin, publishAgentPr as publishAgentPrRaw, upsertAgentRun,
 } from "../scripts/agent-pr.mjs";
 import { AgentPolicyError, loadAgentPolicy, parseAgentPolicy } from "../scripts/load-agent-policy.mjs";
@@ -76,6 +76,58 @@ test("installation token is scoped to the origin repository and required write p
   });
   assert.equal(github.calls[0].redirect, "error");
   assert.ok(github.calls[0].headers.Authorization.startsWith("Bearer "));
+});
+
+test("GitHub App installation tokens can opt into orchestration scopes while keeping core publication permissions", async () => {
+  const github = mockGitHub([installation, access]);
+  const token = await mintInstallationToken({
+    ...credentials,
+    additionalPermissions: {
+      actions: "read",
+      deployments: "read",
+      environments: "read",
+      issues: "write",
+      organization_projects: "write",
+      repository_projects: "write",
+      variables: "read",
+    },
+  }, github);
+  assert.deepEqual(token, { token: access.token, appSlug: AGENT });
+  assert.deepEqual(JSON.parse(github.calls[1].body), {
+    repositories: ["example-repo"],
+    permissions: {
+      contents: "write",
+      issues: "write",
+      pull_requests: "write",
+      actions: "read",
+      deployments: "read",
+      environments: "read",
+      issues: "write",
+      organization_projects: "write",
+      repository_projects: "write",
+      variables: "read",
+    },
+  });
+});
+
+test("additional installation permissions reject invalid names and excessive access", () => {
+  for (const additionalPermissions of [
+    { projects: "write" },
+    { actions: "write" },
+    { deployments: "write" },
+    { environments: "write" },
+    { variables: "write" },
+    { administration: "write" },
+  ]) {
+    assert.throws(
+      () => buildInstallationPermissions({ additionalPermissions }),
+      /Unsupported additional installation permission/,
+    );
+  }
+  assert.throws(
+    () => buildInstallationPermissions({ additionalPermissions: null }),
+    /must be an object/,
+  );
 });
 
 test("a different or suspended App installation is rejected before minting a token", async () => {
@@ -462,7 +514,11 @@ test("--merge-when-green merges a ready or draft PR by exact SHA and only then d
     assert.equal(merge.method, "PUT");
     assert.deepEqual(JSON.parse(merge.body), { sha: commitSha, merge_method: "merge", commit_message: buildCommitMessage("feat: helper", "test-model", AGENT) });
     const tokenRequest = mock.requests.find((call) => call.url.endsWith("/access_tokens"));
-    assert.deepEqual(JSON.parse(tokenRequest.body).permissions, { contents: "write", pull_requests: "write", checks: "read" });
+    assert.deepEqual(JSON.parse(tokenRequest.body).permissions, {
+      contents: "write",
+      pull_requests: "write",
+      checks: "read",
+    });
     const deletion = mock.requests.find((call) => call.url.includes("/git/refs/heads/"));
     assert.equal(deletion.method, "DELETE");
     assert.ok(deletion.url.endsWith("/git/refs/heads/feat%2Fbot-helper"));
@@ -787,14 +843,24 @@ test("an invalid or human account cannot stand in for the configured App bot", a
   }
 });
 
-test("the onboarding manifest is owner-only with explicit minimal permissions and placeholder callbacks", () => {
+test("the onboarding manifest is owner-only with explicit scoped permissions and placeholder callbacks", () => {
   const manifest = JSON.parse(readFileSync(new URL("../docs/app-manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.name, "YOUR-ACCOUNT-agent-coder");
   assert.equal(manifest.url, "https://github.com/R4yHarris/github-agent-contracts");
   assert.equal(manifest.public, false);
   assert.equal(manifest.request_oauth_on_install, false);
   assert.deepEqual(manifest.default_permissions, {
-    metadata: "read", contents: "write", issues: "write", pull_requests: "write", checks: "read",
+    metadata: "read",
+    actions: "read",
+    checks: "read",
+    contents: "write",
+    deployments: "read",
+    environments: "read",
+    issues: "write",
+    organization_projects: "write",
+    pull_requests: "write",
+    repository_projects: "write",
+    variables: "read",
   });
   assert.deepEqual(manifest.default_events, []);
   assert.equal(manifest.hook_attributes.active, false);

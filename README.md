@@ -4,7 +4,7 @@ github-agent-contracts gives Hermes, Claude Code, GitHub Copilot, OpenClaw, Curs
 
 ## Give agents their own identity in 3 steps
 
-1. **Create your own GitHub App** from [docs/app-manifest.json](docs/app-manifest.json). Your user or organization owns the App and its key; install it on selected repositories only. Follow [ONBOARDING](docs/ONBOARDING.md) for registration and the two publisher environment variables.
+1. **Create your own GitHub App** from [docs/app-manifest.json](docs/app-manifest.json). Your user or organization owns the App and its key; install it on selected repositories only. Follow [ONBOARDING](docs/ONBOARDING.md) for registration and the two publisher environment variables. Keep the manifest scoped to the repository and task: if project management or environment orchestration is required, review the optional `repository_projects`, `organization_projects`, `actions`, `deployments`, `environments`, and `variables` scopes before installation.
 2. **Define repository permissions** in root `agent-policy.yml`. A human reviews and publishes the [default-deny example](examples/agent-policy.yml). Coder can commit feature branches, open draft PRs, comment, and label; merge and deploy remain denied by default. See [POLICY](docs/POLICY.md).
 3. **Publish as the App bot** with `node scripts/agent-pr.mjs`. Copy the required files from the onboarding guide, review and stage the changes, pass tests and policy gates, then run the authorized publication command:
 
