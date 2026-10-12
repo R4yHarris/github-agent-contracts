@@ -66,6 +66,8 @@ There is no closing marker or second document. An existing `<!-- agent-run:1 -->
 
 The commit receives one `AI-Run` footer line; the PR body receives the tagged pair rather than another copy of that footer line. Evaluation comments are separate from both.
 
+For interrupted publication, `agent-pr.mjs --resume <existing-head-sha>` uses the existing bot commit's model and run rather than the retrying harness environment. After policy, identity, exact-head, and required-check validation, it restores a missing tagged pair, leaves an identical pair unchanged, and refuses conflicting existing metadata. It never rewrites the commit or replaces an earlier session/model record. An absent committed `AI-Run` remains absent. See [POLICY.md](POLICY.md#resume-an-exact-published-head) for the resume-only gates and optional authorized merge.
+
 ## Validate and export locally
 
 The default [trailer checker](../scripts/check-agent-trailers.mjs) still checks only `AI-Agent` and `AI-Model`. Opt in to requiring a valid, model-matching run trailer on agent-classified commits:

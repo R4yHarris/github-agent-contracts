@@ -48,7 +48,13 @@ To stage and commit named files, put `--files` last:
 node scripts/agent-pr.mjs --message "docs: clarify agent contracts" --model gpt-5 --files README.md AGENTS.md
 ```
 
-`--help` does not read policy, the key, or contact GitHub. Normal invocation first requires the local coder grants, then signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. Only the merge flag adds Checks read to the token request. After checking the approved policy and branch protections, it makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
+`--help` does not read policy, the key, or contact GitHub. Normal invocation first requires the local coder grants, then signs an App JWT, discovers the repository installation, and requests an installation token scoped to that repository with contents and pull requests write permissions. The merge flag or resume mode adds Checks read to the token request. After checking the approved policy and branch protections, it makes an unsigned bot commit, pushes with in-memory authentication, reuses an open PR for the branch or runs `gh pr create --draft`, then revokes the token. New PR titles follow the repository's `[area] summary` convention with `[agent]` as the default area.
+
+## Resume without republishing
+
+For an interrupted publication, inspect the existing commit and PR before retrying. With authorization for metadata recovery, use `node scripts/agent-pr.mjs --resume <existing-head-sha>`. This creates no commit, push, or PR. It requires a clean worktree, the configured App's original bot author/committer and valid trailers, matching local/remote/PR heads, current reviewed policy grants, and all required exact-head checks green. Checks permission errors (including HTTP 422), missing/merged PRs, or genuine head drift stop without a fallback.
+
+Do not pass `--message`, `--model`, or `--files`: resume preserves the existing model and optional run, ignoring current `AI_*` environment input. It restores only a missing PR run block, leaves an identical block alone, and refuses conflicting earlier metadata. Adding `--merge-when-green` still requires the separate authorization, credential context, merge grants, and conservative cleanup gates below. See [POLICY.md](../../docs/POLICY.md#resume-an-exact-published-head).
 
 ## Merge when green
 

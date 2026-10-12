@@ -199,20 +199,35 @@ export function parseArgs(argv, env = {}) {
         throw new AgentPrError("--files must be last and followed by literal file paths.");
       }
       break;
-    } else if (argument === "--message" || argument === "-m" || argument === "--model") {
+    } else if (argument === "--message" || argument === "-m" || argument === "--model" || argument === "--resume") {
       const value = argv[++index];
       if (value === undefined || value.startsWith("--")) {
-        throw new AgentPrError("--message and --model each need a value.");
+        throw new AgentPrError("--message, --model, and --resume each need a value.");
       }
-      options[argument === "--model" ? "model" : "message"] = value;
+      options[argument === "-m" ? "message" : argument.slice(2)] = value;
     } else if (["--merge", "--push-protected", "--push_protected", "--deploy"].includes(argument)) {
       throw new AgentPrError("Use --merge-when-green only with an approved merger merge grant. Protected pushes and deploys are unsupported.");
     } else {
       throw new AgentPrError("Unknown argument; use --help for usage.");
     }
   }
-  if (!options.help) validateCommitInput(options.message, options.model);
+  if (!options.help) {
+    if (options.resume !== undefined) {
+      if (argv.includes("--model")) throw new AgentPrError("--resume preserves the committed model; do not supply --model.");
+      delete options.model;
+      validateResumeInput(options);
+    } else validateCommitInput(options.message, options.model);
+  }
   return options;
+}
+
+function validateResumeInput(options) {
+  if (typeof options.resume !== "string" || !/^[0-9a-f]{40}$/.test(options.resume)) {
+    throw new AgentPrError("--resume requires the exact existing 40-character lowercase commit SHA.");
+  }
+  if (options.message !== undefined || options.model !== undefined || (options.files ?? []).length) {
+    throw new AgentPrError("--resume cannot accept --message, --model, or --files; it preserves the existing commit.");
+  }
 }
 
 function safeFile(file, cwd, privateKeyPath) {
@@ -260,14 +275,78 @@ async function readReviewedPolicy(repoPath, defaultBranch, token, fetchImpl) {
   return parseAgentPolicy(Buffer.from(file.content, "base64").toString("utf8"));
 }
 
+async function requireGreenResumeChecks(repoPath, defaultBranch, headSha, token, fetchImpl) {
+  const basePath = `${repoPath}/branches/${encodeURIComponent(defaultBranch)}`;
+  const protection = await githubRequest(`${basePath}/protection/required_status_checks`, token, { fetchImpl, allowMissing: true });
+  const rules = await githubRequest(`${repoPath}/rules/branches/${encodeURIComponent(defaultBranch)}`, token, { fetchImpl });
+  if (!Array.isArray(rules)) throw new AgentPrError("Cannot verify required checks; refusing resume.");
+  const required = [{ context: "check-agent-trailers", appSlug: "github-actions" }];
+  const addChecks = (checks, appKey) => {
+    if (!Array.isArray(checks)) throw new AgentPrError("Cannot verify required checks; refusing resume.");
+    for (const check of checks) {
+      if (typeof check?.context !== "string" || !check.context ||
+          (check[appKey] !== null && check[appKey] !== undefined && !Number.isSafeInteger(check[appKey]))) {
+        throw new AgentPrError("Cannot verify required check identity; refusing resume.");
+      }
+      required.push({ context: check.context, appId: check[appKey] });
+    }
+  };
+  if (protection !== undefined) {
+    addChecks(protection.checks, "app_id");
+    if (!Array.isArray(protection.contexts) || protection.contexts.some((context) => typeof context !== "string" || !context)) {
+      throw new AgentPrError("Cannot verify required check contexts; refusing resume.");
+    }
+    for (const context of protection.contexts) {
+      if (!protection.checks.some((check) => check.context === context)) required.push({ context });
+    }
+  }
+  let hasRequiredRules = false;
+  for (const rule of rules) {
+    if (typeof rule?.type !== "string") throw new AgentPrError("Cannot verify required rules; refusing resume.");
+    if (rule.type === "required_status_checks") {
+      addChecks(rule.parameters?.required_status_checks, "integration_id");
+      if (rule.parameters.required_status_checks.length) hasRequiredRules = true;
+    }
+  }
+  if (protection === undefined) {
+    const base = await githubRequest(basePath, token, { fetchImpl });
+    if (base?.name !== defaultBranch || typeof base.protected !== "boolean" ||
+        (base.protected && !hasRequiredRules)) {
+      throw new AgentPrError("Cannot verify required checks on the protected base branch; refusing resume.");
+    }
+  }
+  const checks = await githubRequest(`${repoPath}/commits/${headSha}/check-runs?filter=latest&per_page=100`, token, { fetchImpl });
+  const statuses = await githubRequest(`${repoPath}/commits/${headSha}/status?per_page=100`, token, { fetchImpl });
+  if (!Array.isArray(checks?.check_runs) || checks.total_count !== checks.check_runs.length || checks.total_count > 100 ||
+      !Array.isArray(statuses?.statuses) || statuses.sha !== headSha || statuses.total_count !== statuses.statuses.length || statuses.total_count > 100) {
+    throw new AgentPrError("Cannot verify complete exact-head check results; refusing resume.");
+  }
+  for (const expected of required) {
+    const runs = checks.check_runs.filter((check) => check?.name === expected.context &&
+      (!expected.appSlug || check.app?.slug === expected.appSlug) &&
+      (expected.appId === undefined || expected.appId === null || expected.appId === -1 || check.app?.id === expected.appId));
+    const legacy = statuses.statuses.filter((status) => status?.context === expected.context);
+    const pinnedApp = expected.appSlug || (expected.appId !== undefined && expected.appId !== null && expected.appId !== -1);
+    if (runs.length) {
+      if (runs.some((check) => check.head_sha !== headSha || check.status !== "completed" || check.conclusion !== "success") ||
+          (!pinnedApp && legacy.some((status) => status.state !== "success"))) {
+        throw new AgentPrError("Required checks have not succeeded on the exact head SHA; refusing resume.");
+      }
+    } else if (pinnedApp || !legacy.length || legacy.some((status) => status.state !== "success")) {
+      throw new AgentPrError("Required checks have not succeeded on the exact head SHA; refusing resume.");
+    }
+  }
+}
+
 async function waitForGreenPullRequest({
   repoPath, slug, branch, defaultBranch, headSha, pullNumber, token,
-  fetchImpl, invoke, baseEnv, checkMergePolicy, wait, clock,
+  fetchImpl, invoke, baseEnv, checkMergePolicy, checkResume, wait, clock,
 }) {
   const deadline = clock() + 600_000;
   let markedReady = false;
   for (let attempt = 0; attempt < 120 && clock() < deadline; attempt += 1) {
     await checkMergePolicy();
+    if (checkResume) await checkResume();
     const pull = await githubRequest(`${repoPath}/pulls/${pullNumber}`, token, { fetchImpl });
     if (
       pull?.number !== pullNumber || pull.state !== "open" || pull.merged !== false || typeof pull.draft !== "boolean" ||
@@ -326,9 +405,14 @@ export async function publishAgentPr(options, {
   requireCapability(policy, "coder", "commit_branch");
   requireCapability(policy, "coder", "open_pr");
   if (options.mergeWhenGreen) requireCapability(policy, "merger", "merge");
-  const model = options.model ?? env.AI_MODEL;
-  validateCommitInput(options.message, model);
-  const agentRun = packAgentRun(env, model.trim());
+  const resuming = options.resume !== undefined;
+  let model = options.model ?? env.AI_MODEL;
+  let agentRun = null;
+  if (resuming) validateResumeInput(options);
+  else {
+    validateCommitInput(options.message, model);
+    agentRun = packAgentRun(env, model.trim());
+  }
   const appId = env.GITHUB_APP_ID;
   if (!appId || !/^[1-9][0-9]*$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY_PATH) {
     throw new AgentPrError("Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH in the environment; never paste the key into chat.");
@@ -404,7 +488,19 @@ export async function publishAgentPr(options, {
   if (files.length && staged.some((file) => !files.includes(file))) {
     throw new AgentPrError("Unrelated files are already staged; unstage them or omit --files to use the reviewed index.");
   }
-  if (!files.length && !staged.length) throw new AgentPrError("Stage reviewed changes or supply --files before publishing.");
+  const checkResumeWorktree = () => {
+    checkBranch();
+    if (JSON.stringify(parseOrigin(git(["remote", "get-url", "origin"], "Resume origin verification").trim())) !== JSON.stringify(origin) ||
+        git(["remote", "get-url", "--push", "--all", "origin"], "Resume push origin verification").trim() !== pushOrigins[0]) {
+      throw new AgentPrError("origin changed during resume; refusing to continue.");
+    }
+    if (git(["rev-parse", "--verify", "HEAD"], "Resume head verification").trim() !== options.resume ||
+        git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], "Resume cleanliness verification")) {
+      throw new AgentPrError("Resume requires a clean worktree at the exact existing head SHA.");
+    }
+  };
+  if (resuming) checkResumeWorktree();
+  else if (!files.length && !staged.length) throw new AgentPrError("Stage reviewed changes or supply --files before publishing.");
 
   let key;
   let token;
@@ -415,7 +511,7 @@ export async function publishAgentPr(options, {
     } catch {
       throw new AgentPrError("Could not load the App private key from GITHUB_APP_PRIVATE_KEY_PATH.");
     }
-    ({ token, appSlug } = await mintInstallationToken({ ...origin, appId, privateKey: key, readChecks: options.mergeWhenGreen === true }, { fetchImpl, now }));
+    ({ token, appSlug } = await mintInstallationToken({ ...origin, appId, privateKey: key, readChecks: resuming || options.mergeWhenGreen === true }, { fetchImpl, now }));
   } finally {
     if (Buffer.isBuffer(key)) key.fill(0);
     key = undefined;
@@ -433,7 +529,7 @@ export async function publishAgentPr(options, {
       throw new AgentPrError("GitHub did not return the bot identity for the configured App; refusing to publish.");
     }
     const botEmail = `${bot.id}+${botName}@users.noreply.github.com`;
-    const message = buildCommitMessage(options.message, model, appSlug, agentRun);
+    let message = resuming ? null : buildCommitMessage(options.message, model, appSlug, agentRun);
     const repository = await githubRequest(repoPath, token, { fetchImpl });
     if (
       repository?.full_name?.toLowerCase() !== slug.toLowerCase() ||
@@ -469,36 +565,45 @@ export async function publishAgentPr(options, {
     };
     await checkProtectedBranch();
     checkBranch();
-    if (files.length) {
-      git(["add", "--", ...files], "Staging selected files", { env: { ...baseEnv, GIT_LITERAL_PATHSPECS: "1" } });
+    if (!resuming) {
+      if (files.length) {
+        git(["add", "--", ...files], "Staging selected files", { env: { ...baseEnv, GIT_LITERAL_PATHSPECS: "1" } });
+      }
+      const selected = readStaged();
+      rejectHumanOwnedChanges(selected);
+      checkIndex();
+      for (const file of selected) safeFile(file, cwd, privateKeyPath);
+      if (!selected.length || (files.length && selected.some((file) => !files.includes(file)))) {
+        throw new AgentPrError("The staged changes are empty or no longer match the selected files.");
+      }
+      git(["-c", `user.name=${botName}`, "-c", `user.email=${botEmail}`, "-c", "commit.gpgsign=false", "commit", "--file=-"], "Bot commit", {
+        input: message,
+        env: {
+          ...baseEnv,
+          GIT_AUTHOR_NAME: botName,
+          GIT_AUTHOR_EMAIL: botEmail,
+          GIT_COMMITTER_NAME: botName,
+          GIT_COMMITTER_EMAIL: botEmail,
+        },
+      });
+      committed = true;
     }
-    const selected = readStaged();
-    rejectHumanOwnedChanges(selected);
-    checkIndex();
-    for (const file of selected) safeFile(file, cwd, privateKeyPath);
-    if (!selected.length || (files.length && selected.some((file) => !files.includes(file)))) {
-      throw new AgentPrError("The staged changes are empty or no longer match the selected files.");
-    }
-    git(["-c", `user.name=${botName}`, "-c", `user.email=${botEmail}`, "-c", "commit.gpgsign=false", "commit", "--file=-"], "Bot commit", {
-      input: message,
-      env: {
-        ...baseEnv,
-        GIT_AUTHOR_NAME: botName,
-        GIT_AUTHOR_EMAIL: botEmail,
-        GIT_COMMITTER_NAME: botName,
-        GIT_COMMITTER_EMAIL: botEmail,
-      },
-    });
-    committed = true;
     const actual = git(["log", "-1", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00%B"], "Committed identity verification").split("\0");
-    const checked = checkMessage(actual[5] ?? "", true, "", agentRun !== null);
+    let checked = checkMessage(actual[5] ?? "", true, "", agentRun !== null);
+    if (resuming && Object.hasOwn(checked.trailers, "AI-Run")) checked = checkMessage(actual[5] ?? "", true, "", true);
     if (
       !/^[0-9a-f]{40}$/i.test(actual[0]) || actual[1] !== botName || actual[2] !== botEmail ||
       actual[3] !== botName || actual[4] !== botEmail || !checked.ok ||
-      checked.trailers["AI-Agent"] !== appSlug || checked.trailers["AI-Model"] !== model.trim() ||
-      (checked.trailers["AI-Run"] ?? null) !== agentRun
+      checked.trailers["AI-Agent"] !== appSlug ||
+      (resuming ? actual[0] !== options.resume : checked.trailers["AI-Model"] !== model.trim() ||
+        (checked.trailers["AI-Run"] ?? null) !== agentRun)
     ) {
-      throw new AgentPrError("The new commit does not have the required bot identity and trailers; refusing to push.");
+      throw new AgentPrError("The commit does not have the required bot identity and trailers or exact head SHA; refusing publication.");
+    }
+    if (resuming) {
+      message = actual[5];
+      model = checked.trailers["AI-Model"];
+      agentRun = checked.trailers["AI-Run"] ?? null;
     }
     const committedFiles = git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], "Committed file verification").split("\0").filter(Boolean);
     for (const file of committedFiles) safeFile(file, cwd, privateKeyPath);
@@ -519,31 +624,77 @@ export async function publishAgentPr(options, {
       GIT_CONFIG_KEY_6: "protocol.allow", GIT_CONFIG_VALUE_6: "never",
       GIT_CONFIG_KEY_7: "protocol.https.allow", GIT_CONFIG_VALUE_7: "always",
     };
-    git(["push", "--no-follow-tags", pushUrl, `${actual[0]}:refs/heads/${branch}`], "Branch push", { env: authenticatedEnv });
+    if (!resuming) git(["push", "--no-follow-tags", pushUrl, `${actual[0]}:refs/heads/${branch}`], "Branch push", { env: authenticatedEnv });
     const pullRequestPath = `${repoPath}/pulls?state=open&head=${encodeURIComponent(`${origin.owner}:${branch}`)}`;
     const pullRequests = await githubRequest(pullRequestPath, token, { fetchImpl });
     if (!Array.isArray(pullRequests)) throw new AgentPrError("GitHub returned an invalid pull-request list.");
-    if (!pullRequests.length) {
-      const subject = message.split("\n")[0];
-      const title = /^\[[^\]]+\] /.test(subject) ? subject : `[agent] ${subject.replace(/^[a-z]+(?:\([^)]+\))?!?:\s*/i, "")}`;
-      invoke("gh", [
-        "pr", "create", "--repo", slug, "--head", branch, "--base", repository.default_branch,
-        "--draft", "--title", title, "--body", upsertAgentRun(buildCommitMessage(options.message, model, appSlug), agentRun),
-      ], "Draft pull-request creation", { env: { ...baseEnv, GH_TOKEN: token } });
-    } else if (agentRun !== null) {
+    const checkResume = resuming ? async () => {
+      checkResumeWorktree();
+      const currentPolicy = loadPolicy({ cwd });
+      requireCapability(currentPolicy, "coder", "commit_branch");
+      requireCapability(currentPolicy, "coder", "open_pr");
+      verifyApprovedPolicy(currentPolicy);
+      const reviewed = await readReviewedPolicy(repoPath, repository.default_branch, token, fetchImpl);
+      requireCapability(reviewed, "coder", "commit_branch");
+      requireCapability(reviewed, "coder", "open_pr");
+      verifyApprovedPolicy(reviewed);
+      await checkProtectedBranch();
       if (pullRequests.length !== 1 || !Number.isSafeInteger(pullRequests[0]?.number) || pullRequests[0].number <= 0) {
-        throw new AgentPrError("Expected exactly one open PR before updating AI-Run metadata.");
+        throw new AgentPrError("Resume requires exactly one existing open PR; no PR was created.");
       }
-      const pullPath = `${repoPath}/pulls/${pullRequests[0].number}`;
-      const pull = await githubRequest(pullPath, token, { fetchImpl });
-      if (pull?.number !== pullRequests[0].number || pull.state !== "open" || pull.head?.sha !== actual[0] ||
-          pull.head.ref !== branch || pull.head.repo?.full_name?.toLowerCase() !== slug.toLowerCase()) {
-        throw new AgentPrError("The PR no longer matches the published branch and head SHA; metadata was not updated.");
+      const readExactPull = async () => {
+        const reference = await githubRequest(`${repoPath}/git/ref/heads/${encodeURIComponent(branch)}`, token, { fetchImpl });
+        if (reference?.ref !== `refs/heads/${branch}` || reference.object?.type !== "commit" || reference.object.sha !== actual[0]) {
+          throw new AgentPrError("The remote branch does not match the exact resume head SHA.");
+        }
+        const pull = await githubRequest(`${repoPath}/pulls/${pullRequests[0].number}`, token, { fetchImpl });
+        if (pull?.number !== pullRequests[0].number || pull.state !== "open" || pull.merged !== false || typeof pull.draft !== "boolean" ||
+            pull.head?.sha !== actual[0] || pull.head.ref !== branch || pull.head.repo?.full_name?.toLowerCase() !== slug.toLowerCase() ||
+            pull.base?.ref !== repository.default_branch || pull.base.repo?.full_name?.toLowerCase() !== slug.toLowerCase()) {
+          throw new AgentPrError("The existing PR does not match the exact resume head, branch, base, and repository.");
+        }
+        return pull;
+      };
+      await readExactPull();
+      await requireGreenResumeChecks(repoPath, repository.default_branch, actual[0], token, fetchImpl);
+      const pull = await readExactPull();
+      checkResumeWorktree();
+      return pull;
+    } : undefined;
+    if (resuming) {
+      const pull = await checkResume();
+      if (agentRun !== null) {
+        const body = upsertAgentRun(pull.body, agentRun);
+        if (body !== (pull.body ?? "")) {
+          if ((pull.body ?? "").includes("<!-- agent-run:1 -->")) {
+            throw new AgentPrError("Existing AI-Run metadata differs from the committed run; resume will not replace it.");
+          }
+          await githubRequest(`${repoPath}/pulls/${pull.number}`, token, { method: "PATCH", body: { body }, fetchImpl });
+        }
       }
-      const body = upsertAgentRun(pull.body, agentRun);
-      if (body !== pull.body) await githubRequest(pullPath, token, { method: "PATCH", body: { body }, fetchImpl });
+    } else {
+      if (!pullRequests.length) {
+        const subject = message.split("\n")[0];
+        const title = /^\[[^\]]+\] /.test(subject) ? subject : `[agent] ${subject.replace(/^[a-z]+(?:\([^)]+\))?!?:\s*/i, "")}`;
+        invoke("gh", [
+          "pr", "create", "--repo", slug, "--head", branch, "--base", repository.default_branch,
+          "--draft", "--title", title, "--body", upsertAgentRun(buildCommitMessage(options.message, model, appSlug), agentRun),
+        ], "Draft pull-request creation", { env: { ...baseEnv, GH_TOKEN: token } });
+      } else if (agentRun !== null) {
+        if (pullRequests.length !== 1 || !Number.isSafeInteger(pullRequests[0]?.number) || pullRequests[0].number <= 0) {
+          throw new AgentPrError("Expected exactly one open PR before updating AI-Run metadata.");
+        }
+        const pullPath = `${repoPath}/pulls/${pullRequests[0].number}`;
+        const pull = await githubRequest(pullPath, token, { fetchImpl });
+        if (pull?.number !== pullRequests[0].number || pull.state !== "open" || pull.head?.sha !== actual[0] ||
+            pull.head.ref !== branch || pull.head.repo?.full_name?.toLowerCase() !== slug.toLowerCase()) {
+          throw new AgentPrError("The PR no longer matches the published branch and head SHA; metadata was not updated.");
+        }
+        const body = upsertAgentRun(pull.body, agentRun);
+        if (body !== pull.body) await githubRequest(pullPath, token, { method: "PATCH", body: { body }, fetchImpl });
+      }
     }
-    result = { commit: actual[0], botName, createdPullRequest: !pullRequests.length };
+    result = { commit: actual[0], botName, createdPullRequest: !pullRequests.length, ...(resuming ? { resumed: true } : {}) };
     if (options.mergeWhenGreen) {
       const candidates = pullRequests.length ? pullRequests : await githubRequest(pullRequestPath, token, { fetchImpl });
       if (!Array.isArray(candidates) || candidates.length !== 1 || !Number.isSafeInteger(candidates[0]?.number) || candidates[0].number <= 0) {
@@ -560,9 +711,10 @@ export async function publishAgentPr(options, {
       };
       await waitForGreenPullRequest({
         repoPath, slug, branch, defaultBranch: repository.default_branch, headSha: actual[0], pullNumber, token,
-        fetchImpl, invoke, baseEnv, checkMergePolicy, wait, clock,
+        fetchImpl, invoke, baseEnv, checkMergePolicy, checkResume, wait, clock,
       });
       await checkMergePolicy();
+      if (checkResume) await checkResume();
       const mergeResult = await githubRequest(`${repoPath}/pulls/${pullNumber}/merge`, token, {
         method: "PUT", body: { sha: actual[0], merge_method: "merge", commit_message: message }, fetchImpl,
       });
@@ -628,7 +780,13 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   }
   if (options.help) {
     stdout.write(`Usage: node scripts/agent-pr.mjs --message TEXT [--model NAME] [--merge-when-green] [--files PATH ...]
+       node scripts/agent-pr.mjs --resume SHA [--merge-when-green]
 
+--resume requires a clean worktree and an existing App bot commit, remote branch,
+and open PR at that exact SHA. It creates no commit, push, or PR. Checks read is
+required; all required exact-head checks must be green before metadata recovery.
+It preserves committed model/run metadata, ignores current AI_* environment data,
+and refuses --message, --model, --files, head drift, or conflicting PR run metadata.
 Without --files, commits the reviewed staged changes. --files must be last.
 --model overrides AI_MODEL; one must name the actual model id (not unknown).
 Missing or invalid model input exits 2 before publication. Never invent a model.
@@ -646,14 +804,18 @@ exact head SHA, marks drafts ready, merges with a merge commit, then deletes tha
 After remote deletion it fetches origin with the App token, fast-forwards the local
 default branch, and deletes the unchanged local feature branch only if clean.
 No self-approval, squash, role/policy override, protected push, deploy, or auto-merge mode.
-An invocation authorizes commit, push, and PR creation. Keep secrets out of arguments.
+Normal mode performs commit, push, and PR creation; resume mode does not.
+Use only with explicit authorization for the selected operations. Keep secrets out of arguments.
 `);
     return 0;
   }
   try {
     const result = await publishAgentPr(options, dependencies);
-    stdout.write(`Committed ${result.commit.slice(0, 7)} as ${result.botName} and pushed to origin.\n`);
-    stdout.write(result.createdPullRequest ? "Created a draft pull request.\n" : "Updated the branch for its existing pull request.\n");
+    if (result.resumed) stdout.write(`Resumed existing ${result.commit.slice(0, 7)} as ${result.botName}; no commit, push, or PR creation.\n`);
+    else {
+      stdout.write(`Committed ${result.commit.slice(0, 7)} as ${result.botName} and pushed to origin.\n`);
+      stdout.write(result.createdPullRequest ? "Created a draft pull request.\n" : "Updated the branch for its existing pull request.\n");
+    }
     if (result.merged) stdout.write(`Merged PR #${result.pullRequest} with a merge commit, removed its remote and local feature branches, and checked out ${result.checkedOutBranch}.\n`);
     return 0;
   } catch (error) {

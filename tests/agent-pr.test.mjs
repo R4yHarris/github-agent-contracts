@@ -501,6 +501,365 @@ function mockMergePublication({ draft = false, existing = true, checkRuns } = {}
   return { ...mock, pull, elapsed: () => elapsed };
 }
 
+function mockResumePublication({ agentRun = compactRun, ...setup } = {}) {
+  const mock = mockMergePublication(setup);
+  const message = buildCommitMessage("fix: original publication", "claude-sonnet-4.5", AGENT, agentRun);
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    const output = originalRun(command, args, options);
+    if (args[0] === "log") return [commitSha, BOT_NAME, BOT_EMAIL, BOT_NAME, BOT_EMAIL, message].join("\0");
+    if (args[0] === "diff") return "";
+    return output;
+  };
+  Object.assign(mock.dependencies.env, runEnvironment, { AI_MODEL: "different-retry-model", AI_SESSION: "different-session", AI_EFFORT: "invalid" });
+  mock.pull.body = "Original human description.";
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = async (url, options) => {
+    let response;
+    if (url.endsWith("/protection/required_status_checks")) response = new Response(null, { status: 404 });
+    else if (url.includes("/status?")) response = { sha: commitSha, total_count: 0, statuses: [] };
+    else if (url.endsWith("/pulls/7") && options.method === "PATCH") {
+      mock.pull.body = JSON.parse(options.body).body;
+      response = mock.pull;
+    } else return originalFetch(url, options);
+    mock.requests.push({ url, ...options });
+    return response instanceof Response ? response : Response.json(response);
+  };
+  return { ...mock, message };
+}
+
+function assertNoResumePublication(mock, { metadata = false, merge = false } = {}) {
+  assert.ok(!mock.commands.some((call) => call.args.includes("commit") || ["add", "push"].includes(call.args[0]) ||
+    (call.command === "gh" && call.args[1] === "create")));
+  if (!metadata) assert.ok(!mock.requests.some((call) => call.method === "PATCH"));
+  if (!merge) {
+    assert.ok(!mock.requests.some((call) => call.method === "PUT" || call.url.includes("/git/refs/heads/")));
+    assert.ok(!mock.commands.some((call) => ["fetch", "switch", "update-ref"].includes(call.args[0]) ||
+      (call.command === "gh" && call.args[1] === "ready")));
+  }
+}
+
+test("--resume CLI pins an existing SHA and refuses new commit inputs before any effects", async () => {
+  assert.deepEqual(parseArgs(["--resume", commitSha], runEnvironment), { resume: commitSha, files: [] });
+  for (const args of [
+    ["--resume"], ["--resume", "abc"], ["--resume", "A".repeat(40)],
+    ["--resume", commitSha, "--message", "new commit"], ["--resume", commitSha, "--model", "gpt-5"],
+    ["--resume", commitSha, "--files", "README.md"],
+  ]) {
+    const mock = mockResumePublication();
+    assert.equal(await main(args, { ...mock.dependencies, stderr: { write() {} } }), 2);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.commands.length, 0);
+    assert.equal(mock.requests.length, 0);
+  }
+});
+
+test("--resume restores only committed metadata, preserves model/session/unknowns, and never republishes", async () => {
+  for (const agentRun of [compactRun, "1|-|claude-sonnet-4.5@unknown|-|-/-|-|-|-", null]) {
+    const mock = mockResumePublication({ agentRun });
+    const output = [];
+    assert.equal(await main(["--resume", commitSha], {
+      ...mock.dependencies, stdout: { write: (text) => output.push(text) }, stderr: { write: (text) => output.push(text) },
+    }), 0);
+    assertNoResumePublication(mock, { metadata: agentRun !== null });
+    assert.equal(mock.pull.body, agentRun === null ? "Original human description." : upsertAgentRun("Original human description.", agentRun));
+    assert.ok(!mock.pull.body.includes("different-session"));
+    assert.ok(output.join("").includes("no commit, push, or PR creation"));
+    assert.ok(!output.join("").includes("Committed"));
+    assert.deepEqual(JSON.parse(mock.requests.find((call) => call.url.endsWith("/access_tokens")).body).permissions,
+      { contents: "write", pull_requests: "write", checks: "read" });
+    assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
+  }
+});
+
+test("a post-push stale PR head refusal can resume the identical published commit without another publication", async () => {
+  const failed = mockPublication({ pullRequests: [{ number: 7 }] });
+  Object.assign(failed.dependencies.env, runEnvironment);
+  const originalFetch = failed.dependencies.fetchImpl;
+  failed.dependencies.fetchImpl = (url, options) => url.endsWith("/pulls/7")
+    ? Response.json({ number: 7, state: "open", head: { sha: "c".repeat(40) } }) : originalFetch(url, options);
+  await assert.rejects(publishAgentPrRaw({ message: "fix: original publication" }, failed.dependencies),
+    /metadata was not updated.*local commit remains/);
+  assert.equal(failed.commands.filter((call) => call.args.includes("commit")).length, 1);
+  assert.equal(failed.commands.filter((call) => call.args[0] === "push").length, 1);
+  assert.ok(!failed.requests.some((call) => call.method === "PATCH"));
+  const resumed = mockResumePublication();
+  assert.equal(resumed.message, failed.commands.find((call) => call.args.includes("commit")).input);
+  const result = await publishAgentPrRaw({ resume: commitSha }, resumed.dependencies);
+  assert.equal(result.commit, commitSha);
+  assert.equal(result.resumed, true);
+  assert.equal(result.createdPullRequest, false);
+  assert.equal(resumed.pull.body, upsertAgentRun("Original human description.", compactRun));
+  assertNoResumePublication(resumed, { metadata: true });
+});
+
+test("--resume is idempotent and refuses to replace earlier PR run metadata", async () => {
+  const mock = mockResumePublication();
+  mock.pull.body = upsertAgentRun(mock.pull.body, compactRun);
+  await publishAgentPrRaw({ resume: commitSha }, mock.dependencies);
+  assertNoResumePublication(mock);
+  const conflicting = mockResumePublication();
+  conflicting.pull.body = upsertAgentRun("Human text.", compactRun.replace("ses_01K8", "earlier-session"));
+  const original = conflicting.pull.body;
+  await assert.rejects(publishAgentPrRaw({ resume: commitSha }, conflicting.dependencies), /will not replace/);
+  assert.equal(conflicting.pull.body, original);
+  assertNoResumePublication(conflicting);
+});
+
+test("--resume refuses dirty worktrees and local head drift before reading credentials", async () => {
+  for (const fault of ["staged", "unstaged", "untracked", "head"]) {
+    const mock = mockResumePublication();
+    const originalRun = mock.dependencies.run;
+    mock.dependencies.run = (command, args, options) => {
+      if (fault === "head" && args[0] === "rev-parse" && args[1] === "--verify") return "c".repeat(40);
+      if (fault !== "head" && args[0] === "status") return `${fault === "untracked" ? "??" : fault === "staged" ? "M " : " M"} README.md\0`;
+      return originalRun(command, args, options);
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /clean worktree/);
+    assert.equal(mock.keyReads(), 0);
+    assert.equal(mock.requests.length, 0);
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume verifies original author, committer, App slug, model, run, and protected paths", async () => {
+  for (const change of [
+    (output) => output.replace(BOT_NAME, "Human"),
+    (output) => output.replaceAll(BOT_EMAIL, "human@example.com"),
+    (output) => output.replace(`\0${BOT_NAME}\0${BOT_EMAIL}\0fix:`, "\0Human\0human@example.com\0fix:"),
+    (output) => output.replace(`AI-Agent: ${AGENT}`, "AI-Agent: another-app"),
+    (output) => output.replace("AI-Model: claude-sonnet-4.5", "AI-Model: unknown"),
+    (output) => output.replace("|claude-sonnet-4.5@", "|another-model@"),
+    (output) => output.replace(/AI-Run:.*\n/, "AI-Run: invalid\n"),
+    (output) => output.replace(commitSha, "c".repeat(40)),
+  ]) {
+    const mock = mockResumePublication();
+    const originalRun = mock.dependencies.run;
+    mock.dependencies.run = (command, args, options) => {
+      const output = originalRun(command, args, options);
+      return args[0] === "log" ? change(output) : output;
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /required bot identity and trailers/);
+    assertNoResumePublication(mock);
+  }
+  for (const file of ["agent-policy.yml", ".github/workflows/check.yml", "secret.pem"]) {
+    const mock = mockResumePublication();
+    const originalRun = mock.dependencies.run;
+    mock.dependencies.run = (command, args, options) => args[0] === (file === "secret.pem" ? "ls-tree" : "diff-tree")
+      ? `${file}\0` : originalRun(command, args, options);
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /human|private-key/);
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume refuses absent/ambiguous PRs, delivered PRs, forks, target drift, and remote head drift", async () => {
+  for (const fault of ["absent", "ambiguous", "merged", "closed", "head", "branch", "fork", "base", "base-repo", "remote"]) {
+    const mock = mockResumePublication();
+    if (fault === "merged") mock.pull.merged = true;
+    if (fault === "closed") mock.pull.state = "closed";
+    if (fault === "head") mock.pull.head.sha = "c".repeat(40);
+    if (fault === "branch") mock.pull.head.ref = "feat/other";
+    if (fault === "fork") mock.pull.head.repo.full_name = "another/repo";
+    if (fault === "base") mock.pull.base.ref = "another-base";
+    if (fault === "base-repo") mock.pull.base.repo.full_name = "another/repo";
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (["absent", "ambiguous"].includes(fault) && url.includes("/pulls?")) return Response.json(fault === "absent" ? [] : [{ number: 7 }, { number: 8 }]);
+      if (fault === "remote" && url.includes("/git/ref/heads/")) return Response.json({ ref: "refs/heads/feat/bot-helper", object: { type: "commit", sha: "c".repeat(40) } });
+      return originalFetch(url, options);
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /existing open PR|exact resume head/);
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume requires successful complete exact-head checks from the required App", async () => {
+  for (const change of [
+    () => [],
+    (check) => [{ ...check, status: "in_progress", conclusion: null }],
+    (check) => [{ ...check, conclusion: "failure" }],
+    (check) => [{ ...check, conclusion: "neutral" }],
+    (check) => [{ ...check, head_sha: "c".repeat(40) }],
+    (check) => [{ ...check, app: { slug: "another-app" } }],
+  ]) {
+    const mock = mockResumePublication({ checkRuns: change });
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /Required checks/);
+    assertNoResumePublication(mock);
+  }
+  for (const endpoint of ["/check-runs?", "/status?"]) {
+    const mock = mockResumePublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = async (url, options) => {
+      const response = await originalFetch(url, options);
+      if (!url.includes(endpoint)) return response;
+      return Response.json({ ...await response.json(), total_count: 101 });
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /complete exact-head/);
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume enforces legacy and ruleset required checks, including App identity and statuses", async () => {
+  for (const fault of [null, "missing", "wrong-app", "pending-status"]) {
+    const mock = mockResumePublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = async (url, options) => {
+      if (url.endsWith("/protection/required_status_checks")) return Response.json({ contexts: ["legacy"], checks: [{ context: "legacy", app_id: null }] });
+      if (url.endsWith("/rules/branches/main")) return Response.json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "tests", integration_id: 99 }] } }]);
+      if (url.includes("/status?")) return Response.json({ sha: commitSha, total_count: 1, statuses: [{ context: "legacy", state: fault === "pending-status" ? "pending" : "success" }] });
+      const response = await originalFetch(url, options);
+      if (!url.includes("/check-runs?")) return response;
+      const checks = await response.json();
+      if (fault !== "missing") checks.check_runs.push({ name: "tests", head_sha: commitSha, status: "completed", conclusion: "success", app: { id: fault === "wrong-app" ? 100 : 99 } });
+      return Response.json({ ...checks, total_count: checks.check_runs.length });
+    };
+    if (fault === null) await publishAgentPrRaw({ resume: commitSha }, mock.dependencies);
+    else await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /Required checks/);
+    assertNoResumePublication(mock, { metadata: fault === null });
+  }
+});
+
+test("--resume refuses revoked policy, changed committed grants, and permission errors without fallback", async () => {
+  for (const fault of ["local-policy", "reviewed-policy", "committed-policy", "checks-422", "checks-403", "rules-403"]) {
+    const mock = mockResumePublication();
+    const originalLoad = mock.dependencies.loadPolicy;
+    let reads = 0;
+    if (fault === "local-policy") mock.dependencies.loadPolicy = () => ++reads > 1 ? parseAgentPolicy("version: 1\ndefault: deny\n") : originalLoad();
+    const originalRun = mock.dependencies.run;
+    if (fault === "committed-policy") mock.dependencies.run = (command, args, options) => args[0] === "show" ? policySource : originalRun(command, args, options);
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (fault === "reviewed-policy" && url.includes("/contents/agent-policy.yml") && ++reads > 1) return Response.json(approvedPolicyFile);
+      if (fault === "checks-422" && url.endsWith("/access_tokens")) return Response.json({ message: access.token }, { status: 422 });
+      if ((fault === "checks-403" && url.includes("/check-runs?")) || (fault === "rules-403" && url.endsWith("/rules/branches/main"))) return Response.json({}, { status: 403 });
+      return originalFetch(url, options);
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), (error) => {
+      assert.match(error.message, /policy denies|differs from|HTTP 422|HTTP 403/);
+      assert.ok(!error.message.includes(access.token));
+      return true;
+    });
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume --merge-when-green reuses the merge gates and original provenance without republishing", async () => {
+  const mock = mockResumePublication({ draft: true });
+  const result = await publishAgentPrRaw({ resume: commitSha, mergeWhenGreen: true }, mock.dependencies);
+  assert.equal(result.resumed, true);
+  assert.equal(result.merged, true);
+  assert.equal(result.createdPullRequest, false);
+  assert.equal(result.localBranchDeleted, true);
+  assertNoResumePublication(mock, { metadata: true, merge: true });
+  assert.deepEqual(JSON.parse(mock.requests.find((call) => call.url.endsWith("/merge")).body),
+    { sha: commitSha, merge_method: "merge", commit_message: mock.message });
+});
+
+test("--resume stops on head drift after readiness and before merge", async () => {
+  const mock = mockResumePublication({ draft: true, agentRun: null });
+  const originalRun = mock.dependencies.run;
+  mock.dependencies.run = (command, args, options) => {
+    const output = originalRun(command, args, options);
+    if (command === "gh" && args[1] === "ready") mock.pull.head.sha = "c".repeat(40);
+    return output;
+  };
+  await assert.rejects(publishAgentPrRaw({ resume: commitSha, mergeWhenGreen: true }, mock.dependencies), /exact resume head/);
+  assert.ok(!mock.requests.some((call) => call.method === "PUT"));
+  assertNoResumePublication(mock, { merge: true });
+});
+
+test("--resume refuses remote or repository drift during check reads before metadata writes", async () => {
+  for (const fault of ["remote", "origin"]) {
+    const mock = mockResumePublication();
+    let checking = false;
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = async (url, options) => {
+      const response = await originalFetch(url, options);
+      if (url.includes("/check-runs?")) checking = true;
+      if (checking && fault === "remote" && url.includes("/git/ref/heads/")) return Response.json({ ref: "refs/heads/feat/bot-helper", object: { type: "commit", sha: "c".repeat(40) } });
+      return response;
+    };
+    const originalRun = mock.dependencies.run;
+    mock.dependencies.run = (command, args, options) => checking && fault === "origin" && args[0] === "remote"
+      ? "https://github.com/other/repository.git\n" : originalRun(command, args, options);
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /exact resume head|origin changed/);
+    assertNoResumePublication(mock);
+  }
+});
+
+test("--resume cannot treat an unreadable protected base as having no required checks", async () => {
+  const mock = mockResumePublication();
+  const originalFetch = mock.dependencies.fetchImpl;
+  mock.dependencies.fetchImpl = (url, options) => url.endsWith("/branches/main") && !url.includes("/rules/")
+    ? Response.json({ name: "main", protected: true }) : originalFetch(url, options);
+  await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /protected base branch/);
+  assertNoResumePublication(mock);
+});
+
+test("--resume accepts ruleset-only protected bases and enforces exact-head required App checks", async () => {
+  for (const fault of [null, "missing", "pending", "failed", "wrong-app", "wrong-head"]) {
+    const mock = mockResumePublication({
+      checkRuns: (check) => fault === "missing" ? [] : [{
+        ...check,
+        app: { slug: "github-actions", id: fault === "wrong-app" ? 999 : 15368 },
+        head_sha: fault === "wrong-head" ? "c".repeat(40) : commitSha,
+        status: fault === "pending" ? "in_progress" : "completed",
+        conclusion: fault === "pending" ? null : fault === "failed" ? "failure" : "success",
+      }],
+    });
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (url.endsWith("/protection/required_status_checks")) return Response.json({ message: "Branch not protected" }, { status: 404 });
+      if (url.endsWith("/rules/branches/main")) return Response.json([{
+        type: "required_status_checks",
+        parameters: { required_status_checks: [{ context: "check-agent-trailers", integration_id: 15368 }] },
+      }]);
+      if (url.endsWith("/branches/main")) return Response.json({ name: "main", protected: true });
+      return originalFetch(url, options);
+    };
+    if (fault === null) {
+      const result = await publishAgentPrRaw({ resume: commitSha }, mock.dependencies);
+      assert.equal(result.resumed, true);
+      assert.equal(mock.pull.body, upsertAgentRun("Original human description.", compactRun));
+    } else await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), /Required checks/);
+    assertNoResumePublication(mock, { metadata: fault === null });
+  }
+});
+
+test("--resume refuses ruleset-only protected bases with missing, ambiguous, or unavailable controls", async () => {
+  for (const fault of ["no-rules", "empty-checks", "unrelated-rule", "missing-parameters", "bad-context", "bad-app",
+    "malformed-rules", "rules-403", "rules-404", "rules-422", "base-403", "unknown-protection", "wrong-base"]) {
+    const mock = mockResumePublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (url.endsWith("/protection/required_status_checks")) return Response.json({ message: "Branch not protected" }, { status: 404 });
+      if (url.endsWith("/rules/branches/main")) {
+        if (fault.startsWith("rules-")) return Response.json({}, { status: Number(fault.slice(6)) });
+        if (fault === "malformed-rules") return Response.json({});
+        if (fault === "no-rules") return Response.json([]);
+        if (fault === "unrelated-rule") return Response.json([{ type: "pull_request" }]);
+        if (fault === "missing-parameters") return Response.json([{ type: "required_status_checks" }]);
+        return Response.json([{
+          type: "required_status_checks",
+          parameters: { required_status_checks: fault === "empty-checks" ? [] : [{
+            context: fault === "bad-context" ? "" : "check-agent-trailers",
+            integration_id: fault === "bad-app" ? "15368" : 15368,
+          }] },
+        }]);
+      }
+      if (url.endsWith("/branches/main")) {
+        if (fault === "base-403") return Response.json({}, { status: 403 });
+        return Response.json({ name: fault === "wrong-base" ? "other" : "main",
+          protected: fault === "unknown-protection" ? null : true });
+      }
+      return originalFetch(url, options);
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies),
+      /Cannot verify required|HTTP 403|HTTP 404|HTTP 422/);
+    assertNoResumePublication(mock);
+  }
+});
+
 test("--merge-when-green merges a ready or draft PR by exact SHA and only then deletes its branch", async () => {
   for (const setup of [{}, { draft: true }, { draft: true, existing: false }]) {
     const mock = mockMergePublication(setup);

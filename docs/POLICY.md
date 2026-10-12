@@ -129,6 +129,22 @@ Only after GitHub confirms the merge does it delete the remote feature branch. I
 
 On failure, the published commit and PR can remain, and a timed-out flow may have marked a draft ready. Inspect the PR and both remote and local branches before retrying; do not create a duplicate commit just to retry a merge. Human-only merge remains the default, and deploys and direct protected pushes stay disabled. See [ROLES.md](ROLES.md) for credential separation.
 
+## Resume an exact published head
+
+After an interrupted publication, use the existing commit's full lowercase SHA:
+
+```bash
+node scripts/agent-pr.mjs --resume <existing-head-sha>
+```
+
+This operation creates **no commit, push, or PR**. It requires a clean worktree on an unprotected feature branch, an existing commit with the configured App's verified bot author and committer, valid provenance trailers, and exactly one open, unmerged PR targeting origin's default branch. Local HEAD, the remote branch, and the PR head must all equal the supplied SHA. A missing PR or any drift is a refusal, not a reason to publish again. Committed protected paths and policy are checked as for normal publication; local, committed, and currently reviewed default-branch grants must agree.
+
+Resume requests Checks read even without merging. Before recovering metadata it requires successful GitHub Actions `check-agent-trailers` on that exact SHA and every status check required by the base branch's protection and active rules, including configured App identities. Legacy commit statuses are accepted only for requirements without a pinned App. Missing, pending, failed, incomplete (more than 100 results), or unverifiable check results stop immediately; run resume again only after the same head is green. A legacy protection endpoint returning 404 is accepted when the base branch is confirmed unprotected, or when it is protected by rulesets with successfully fetched and validated nonempty required-status-check rules. A protected base with missing, empty, malformed, or unavailable required rules remains refused. API errors, including HTTP 422 when minting a Checks-scoped token, remain hard stops: an authorized human must resolve installation permissions, not an agent changing scopes or using human credentials.
+
+The operation reads the original model and optional `AI-Run` from the existing commit, ignoring the retrying process's `AI_*` environment. It rejects `--message`, `--model`, and `--files`. A missing PR run block can be restored from that commit without replacing other text; an identical block is untouched and a conflicting existing block is refused. No absent metadata, counts, session, or task values are invented.
+
+`--resume <existing-head-sha> --merge-when-green` additionally requires the same explicit human merge/cleanup authorization, separate approved credential context, and `merger.merge` gates described above. Resume revalidates exact heads, current coder grants, required checks, and worktree state during the merge wait and immediately before merging. It reuses the existing SHA-guarded merge and conservative cleanup flow with the original commit message and provenance. Without the merge flag, draft readiness, merging, and cleanup are not attempted.
+
 ## Limits
 
 This is not a sandbox against a malicious human, compromised runner, or an agent that can replace its own trusted executor. Protect the default branch, loader, publisher, harness launch configuration, and credential storage. The policy checker does not create GitHub branch rules, scan all history for secrets, or independently prevent API calls made outside an approved executor. App permissions and GitHub protection rules remain necessary enforcement boundaries.
