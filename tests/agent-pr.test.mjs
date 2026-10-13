@@ -78,6 +78,20 @@ test("installation token is scoped to the origin repository and required write p
   assert.ok(github.calls[0].headers.Authorization.startsWith("Bearer "));
 });
 
+test("installation tokens request administration read only for resume checks", async () => {
+  const github = mockGitHub([installation, access]);
+  await mintInstallationToken({ ...credentials, readChecks: true, readAdministration: true }, github);
+  assert.deepEqual(JSON.parse(github.calls[1].body), {
+    repositories: ["example-repo"],
+    permissions: { contents: "write", pull_requests: "write", checks: "read", administration: "read" },
+  });
+  assert.deepEqual(buildInstallationPermissions({ readChecks: true }), {
+    contents: "write",
+    pull_requests: "write",
+    checks: "read",
+  });
+});
+
 test("GitHub App installation tokens can opt into orchestration scopes while keeping core publication permissions", async () => {
   const github = mockGitHub([installation, access]);
   const token = await mintInstallationToken({
@@ -567,7 +581,7 @@ test("--resume restores only committed metadata, preserves model/session/unknown
     assert.ok(output.join("").includes("no commit, push, or PR creation"));
     assert.ok(!output.join("").includes("Committed"));
     assert.deepEqual(JSON.parse(mock.requests.find((call) => call.url.endsWith("/access_tokens")).body).permissions,
-      { contents: "write", pull_requests: "write", checks: "read" });
+      { contents: "write", pull_requests: "write", checks: "read", administration: "read" });
     assert.equal(mock.requests.at(-1).url, "https://api.github.com/installation/token");
   }
 });
@@ -742,6 +756,37 @@ test("--resume refuses revoked policy, changed committed grants, and permission 
     assertNoResumePublication(mock);
   }
 });
+
+for (const status of [403, 422]) {
+  test(`--resume stops on HTTP ${status} when administration read is not accepted`, async () => {
+    const mock = mockResumePublication();
+    const originalFetch = mock.dependencies.fetchImpl;
+    mock.dependencies.fetchImpl = (url, options) => {
+      if (url.endsWith("/access_tokens")) {
+        mock.requests.push({ url, ...options });
+        return Response.json({ message: "Resource not accessible by integration" }, { status });
+      }
+      return originalFetch(url, options);
+    };
+    await assert.rejects(publishAgentPrRaw({ resume: commitSha }, mock.dependencies), {
+      message: `GitHub API request failed (HTTP ${status}).`,
+    });
+    const tokenRequest = mock.requests.find((call) => call.url.endsWith("/access_tokens"));
+    assert.deepEqual(JSON.parse(tokenRequest.body), {
+      repositories: ["example-repo"],
+      permissions: {
+        contents: "write",
+        pull_requests: "write",
+        checks: "read",
+        administration: "read",
+      },
+    });
+    assert.equal(mock.requests.length, 2);
+    assert.deepEqual(mock.requests.map((call) => call.url.split("/").at(-1)), ["installation", "access_tokens"]);
+    assert.equal(mock.keyReads(), 1);
+    assert.ok(!mock.commands.some((call) => call.args.includes("commit") || call.args[0] === "push"));
+  });
+}
 
 test("--resume --merge-when-green reuses the merge gates and original provenance without republishing", async () => {
   const mock = mockResumePublication({ draft: true });

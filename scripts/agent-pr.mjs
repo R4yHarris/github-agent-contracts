@@ -76,7 +76,11 @@ const OPTIONAL_ORCHESTRATION_PERMISSIONS = new Map([
   ["variables", new Set(["read"])],
 ]);
 
-export function buildInstallationPermissions({ readChecks = false, additionalPermissions = {} } = {}) {
+export function buildInstallationPermissions({
+  readChecks = false,
+  readAdministration = false,
+  additionalPermissions = {},
+} = {}) {
   if (
     additionalPermissions === null ||
     typeof additionalPermissions !== "object" ||
@@ -95,11 +99,20 @@ export function buildInstallationPermissions({ readChecks = false, additionalPer
     ...additionalPermissions,
   };
   if (readChecks) permissions.checks = "read";
+  if (readAdministration) permissions.administration = "read";
   return permissions;
 }
 
 export async function mintInstallationToken(
-  { appId, privateKey, owner, repository, readChecks = false, additionalPermissions = {} },
+  {
+    appId,
+    privateKey,
+    owner,
+    repository,
+    readChecks = false,
+    readAdministration = false,
+    additionalPermissions = {},
+  },
   { fetchImpl = globalThis.fetch, now = Date.now() } = {},
 ) {
   const jwt = createAppJwt(appId, privateKey, now);
@@ -113,7 +126,7 @@ export async function mintInstallationToken(
   ) {
     throw new AgentPrError("The repository needs an active installation matching GITHUB_APP_ID.");
   }
-  const permissions = buildInstallationPermissions({ readChecks, additionalPermissions });
+  const permissions = buildInstallationPermissions({ readChecks, readAdministration, additionalPermissions });
   const access = await githubRequest(`/app/installations/${installation.id}/access_tokens`, jwt, {
     method: "POST",
     body: { repositories: [repository], permissions },
@@ -511,7 +524,16 @@ export async function publishAgentPr(options, {
     } catch {
       throw new AgentPrError("Could not load the App private key from GITHUB_APP_PRIVATE_KEY_PATH.");
     }
-    ({ token, appSlug } = await mintInstallationToken({ ...origin, appId, privateKey: key, readChecks: resuming || options.mergeWhenGreen === true }, { fetchImpl, now }));
+    ({
+      token,
+      appSlug,
+    } = await mintInstallationToken({
+      ...origin,
+      appId,
+      privateKey: key,
+      readChecks: resuming || options.mergeWhenGreen === true,
+      readAdministration: resuming,
+    }, { fetchImpl, now }));
   } finally {
     if (Buffer.isBuffer(key)) key.fill(0);
     key = undefined;
@@ -783,8 +805,9 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
        node scripts/agent-pr.mjs --resume SHA [--merge-when-green]
 
 --resume requires a clean worktree and an existing App bot commit, remote branch,
-and open PR at that exact SHA. It creates no commit, push, or PR. Checks read is
-required; all required exact-head checks must be green before metadata recovery.
+and open PR at that exact SHA. It creates no commit, push, or PR. Checks read and
+Administration read are required for resume; all required exact-head checks must
+be green before metadata recovery. A human must accept installation permissions.
 It preserves committed model/run metadata, ignores current AI_* environment data,
 and refuses --message, --model, --files, head drift, or conflicting PR run metadata.
 Without --files, commits the reviewed staged changes. --files must be last.
